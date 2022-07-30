@@ -1,0 +1,11 @@
+[package]
+name = "rusttracer"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ultraviolet = { version = "0.6", features = [ "f64", "int" ] }
+fastrand = "1.8.0"
+image = "0.24.3"
