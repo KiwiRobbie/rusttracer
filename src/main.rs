@@ -1,6 +1,12 @@
+#![feature(test)]
+
 use ultraviolet as uv;
 use fastrand;
 use uv::Lerp;
+
+extern crate test;
+use test::Bencher;
+use uv::Vec3;
 
 // Basic data structs
 struct Ray{
@@ -16,6 +22,11 @@ struct Sphere{
 struct Plane{
     o: uv::Vec3,
     n: uv::Vec3
+}
+
+struct Aabb{
+    p1: uv::Vec3,
+    p2: uv::Vec3
 }
 
 // Render Objects 
@@ -126,6 +137,58 @@ impl Hittable for SphereRenderObject{
     }
 }
 
+struct TriRenderObject{
+    tri: Tri, 
+    mat: Box<dyn Material>
+}
+
+impl Hittable for TriRenderObject{
+    fn ray_test(&self, ray: &Ray) -> Option<Hit> {
+        let t: f32 = tri_intersect(&self.tri, ray);
+        if t==f32::MAX
+            { return None }
+        let pos = ray.o+ray.d*t;
+        let norm = self.tri.n;
+
+        Some(Hit{
+            t,
+            pos,
+            norm,
+            mat: &*self.mat
+        })
+    }
+}
+
+struct TriClusterRenderObject{
+    tris: Trix8, 
+    mat: Box<dyn Material>
+}
+
+impl Hittable for TriClusterRenderObject{
+    fn ray_test(&self, ray: &Ray) -> Option<Hit> {
+        let t: uv::f32x8 = tri_intersect_8(&self.tris, ray);
+        let t_in: [f32; 8] = t.into();
+        let (i, t) = t_in.into_iter().enumerate().reduce(
+            |accum, item| {
+                if accum.1 <= item.1 { accum } else { item }
+            }
+        ).unwrap();
+        
+        if t==f32::MAX
+            { return None; }
+
+        let pos = ray.o+ray.d*t;
+        let norm: uv::Vec3 =self.tris.n[i];
+
+        Some(Hit{
+            t,
+            pos,
+            norm,
+            mat: &*self.mat
+        })
+    }
+}
+ 
 
 struct RenderObjectList{
     objects: Vec<Box<dyn Hittable>> 
@@ -189,7 +252,7 @@ impl Default for Diffuse{
 impl Material for Glossy{
     fn scatter(&self, ray: &Ray, hit: &Hit) -> Option<Ray> {
         Some(Ray{
-            o: hit.pos + hit.norm * 0.000001,
+            o: hit.pos + hit.norm * 0.00001,
             d: ray.d-2.0*(ray.d.dot(hit.norm))*hit.norm
         })
     }
@@ -214,8 +277,8 @@ impl Material for Diffuse{
         }
         
         Some(Ray{
-            o: hit.pos+hit.norm*0.000001,
-            d: (hit.norm + random_unit.normalized()).normalized()
+            o: hit.pos+hit.norm*0.00001,
+            d: (hit.norm*1.00001 + random_unit.normalized()).normalized()
         })
     }
 
@@ -235,6 +298,28 @@ impl Material for Emmisive{
     
 }
 
+// BVH AABB 
+fn aabb_hit(r: Ray, t_min: f32, t_max: f32, min: uv::Vec3, max: uv::Vec3) -> bool {
+    for a in 0..3 {
+        let invD = 1.0 / r.d[a];
+        let mut t0 = (min[a] - r.o[a]) * invD;
+        let mut t1 = (max[a] - r.o[a]) * invD;
+        
+        if invD < 0.0
+        {
+            (t0, t1) = (t1,t0);
+        }
+
+        let t_min = if t0 > t_min {t0} else {t_min};
+        let t_max = if t1 < t_max {t1} else {t_max};
+        if t_max <= t_min {
+            return false;
+        }
+    }
+    true
+}
+
+
 
 fn sample_sky(ray: &Ray) -> uv::Vec3{
     let apex = uv::Vec3::new(0.5,0.7,0.8);
@@ -248,7 +333,7 @@ fn sample_sky(ray: &Ray) -> uv::Vec3{
     let sky_sample = horizon.lerp(apex, ray.d.y.clamp(0.0,1.0)).lerp(ground, (-5.0 * ray.d.y).clamp(0.0, 1.0).powf(0.5));
     let sun_sample = if ray.d.dot(sun_dir) < 0.9 { uv::Vec3::new(0.0,0.0,0.0)}else{sun} ;
 
-    sky_sample + 2.0 * sun_sample
+    0.0*sky_sample + 2.0 * 0.0 *sun_sample
 }
 
 fn trace_ray(ray: &Ray, scene:&dyn Hittable, depth: i32) -> uv::Vec3{ 
@@ -277,15 +362,406 @@ fn trace_ray(ray: &Ray, scene:&dyn Hittable, depth: i32) -> uv::Vec3{
 
 
 
+struct Tri{
+    p0: uv::Vec3,
+    p1: uv::Vec3,
+    p2: uv::Vec3,
+    n: uv::Vec3
+}
+struct Trix8{
+    p0: uv::Vec3x8,
+    p1: uv::Vec3x8,
+    p2: uv::Vec3x8, 
+    n:  [uv::Vec3;8]
+}
+
+struct Rayx8{
+    o: uv::Vec3x8,
+    d: uv::Vec3x8
+}
+
+trait Splat{
+    fn splat(ray: &Ray) -> Rayx8;
+}
+
+impl Splat for Rayx8{
+    fn splat(ray: &Ray) -> Rayx8{
+        Rayx8 { 
+            o: uv::Vec3x8::splat(ray.o),
+            d: uv::Vec3x8::splat(ray.d)
+        }
+    }
+}
+
+fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
+    const EPSILON:  f32 = 0.00001;
+
+    let (edge1, edge2, h, s, q): (uv::Vec3, uv::Vec3, uv::Vec3, uv::Vec3, uv::Vec3);
+    let (a,f,u,v): (f32, f32, f32, f32);
+    edge1 = tri.p1 - tri.p0;
+    edge2 = tri.p2 - tri.p0;
+    h = ray.d.cross(edge2);
+    a = edge1.dot(h);
+    if a > -EPSILON && a < EPSILON
+        { return f32::MAX; }   // This ray is parallel to this triangle.
+    
+    f = 1.0/a;
+    s = ray.o - tri.p0;
+    u = f * s.dot(h);
+    if u < 0.0 || u > 1.0
+        { return f32::MAX; }
+    
+    q = s.cross(edge1);
+    v = f * ray.d.dot(q);
+    if v < 0.0 || u + v > 1.0
+        { return f32::MAX; }
+    // At this stage we can compute t to find out where the intersection point is on the line.
+    let t = f * edge2.dot(q);
+    if t > EPSILON // ray intersection
+    {
+        return t;
+    }
+    // This means that there is a line intersection but not a ray intersection.
+    f32::MAX
+}
+
+fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
+    let EPSILON:  uv::f32x8 = uv::f32x8::splat(0.00001);
+    let ray: Rayx8= Rayx8::splat(ray_single);
+    let (edge1, edge2, h, s, q): (uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8);
+    let (a,f,u,v): (uv::f32x8, uv::f32x8, uv::f32x8, uv::f32x8);
+    edge1 = tri.p1 - tri.p0;
+    edge2 = tri.p2 - tri.p0;
+    h = ray.d.cross(edge2);
+    a = edge1.dot(h);
+
+
+    let test_1 = a.cmp_gt(EPSILON);
+    let test_2 = a.cmp_lt(EPSILON);
+
+    let invalid = a.cmp_gt(-EPSILON) & a.cmp_lt(EPSILON);
+    // if -EPSILON < a && a < EPSILON
+    //     { return f32::MAX; }   // This ray is parallel to this triangle.
+    
+    f = uv::f32x8::ONE/a;
+    s = ray.o - tri.p0;
+    u = f * s.dot(h);
+
+    let invalid = invalid | 
+        u.cmp_lt(uv::f32x8::ZERO) | 
+        u.cmp_gt(uv::f32x8::ONE);
+    // if u < 0.0 || u > 1.0
+    //    { return f32::MAX; }
+    
+    q = s.cross(edge1);
+    v = f * ray.d.dot(q);
+
+    let invalid = invalid | 
+        v.cmp_lt(uv::f32x8::ZERO) |
+        (u+v).cmp_gt(uv::f32x8::ONE);
+    // if v < 0.0 || u + v > 1.0
+    //    { return f32::MAX; }
+
+    // At this stage we can compute t to find out where the intersection point is on the line.
+    let t = f * edge2.dot(q);
+
+    // This means that there is a line intersection but not a ray intersection.
+    let invalid = invalid | t.cmp_le(EPSILON);
+    // if t <= EPSILON 
+    //    { return f32::MAX; }
+    
+    let t_f = invalid.blend(uv::f32x8::splat(f32::MAX), t);
+    let t_f = t_f;
+    return t_f;
+}
+
+fn tri_vec_intersect( 
+    input: (&Vec<Tri>, &Ray)
+
+) -> Vec<f32>{
+    let mut res: Vec<f32> = Vec::with_capacity(input.0.len());
+    for tri in input.0{
+        res.push(tri_intersect(tri, input.1));
+    }
+    return res;
+}
+
+fn tri_vec_intersect_8(
+    input: (&Trix8, & Ray)
+) -> uv::f32x8{
+    tri_intersect_8(input.0, input.1)
+}
+
+//#[bench]
+// fn bench_non_simd_tris(b: &mut Bencher){
+//     let test_ray: Ray = Ray { 
+//         o: uv::Vec3::new( 0.0, 0.0, 0.0),
+//         d: uv::Vec3::new( 0.0, 0.0,-1.0)
+//     };
+
+//     let test_tris: Vec<Tri> = vec![
+//         Tri{
+//             p0: uv::Vec3::new(0.0, 0.0, -1.0),
+//             p1: uv::Vec3::new(1.0, 0.0, -1.0),
+//             p2: uv::Vec3::new(0.0, 1.0, -1.0)
+//         },
+//         Tri{
+//             p0: uv::Vec3::new(1.0, 0.0, -1.0),
+//             p1: uv::Vec3::new(1.0, 1.0, -1.0),
+//             p2: uv::Vec3::new(0.0, 1.0, -1.0)
+//         },
+//         Tri{
+//             p0: uv::Vec3::new(1.0, 0.0, -1.0),
+//             p1: uv::Vec3::new(2.0, 0.0, -1.0),
+//             p2: uv::Vec3::new(1.0, 1.0, -1.0)
+//         },
+//         Tri{
+//             p0: uv::Vec3::new(2.0, 0.0, -1.0),
+//             p1: uv::Vec3::new(2.0, 1.0, -1.0),
+//             p2: uv::Vec3::new(1.0, 1.0, -1.0)
+//         },        
+//         Tri{
+//             p0: uv::Vec3::new(0.0, 0.0, -2.0),
+//             p1: uv::Vec3::new(1.0, 0.0, -2.0),
+//             p2: uv::Vec3::new(0.0, 1.0, -2.0)
+//         },
+//         Tri{
+//             p0: uv::Vec3::new(1.0, 0.0, -2.0),
+//             p1: uv::Vec3::new(1.0, 1.0, -2.0),
+//             p2: uv::Vec3::new(0.0, 1.0, -2.0)
+//         },
+//         Tri{
+//             p0: uv::Vec3::new(1.0, 0.0, -2.0),
+//             p1: uv::Vec3::new(2.0, 0.0, -2.0),
+//             p2: uv::Vec3::new(1.0, 1.0, -2.0)
+//         },
+//         Tri{
+//             p0: uv::Vec3::new(2.0, 0.0, -2.0),
+//             p1: uv::Vec3::new(2.0, 1.0, -2.0),
+//             p2: uv::Vec3::new(1.0, 1.0, -2.0)
+//         }
+//         ];
+
+//         b.iter(||{
+//             Some((&test_tris, &test_ray)).into_iter().map(tri_vec_intersect).collect::<Vec<Vec<f32>>>()
+//         });
+
+// }
+
+fn create_test_tri_cluster() -> Trix8 {
+    let test_tris: Vec<Tri> = vec![
+        Tri{
+            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
+            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
+            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
+            n:  uv::Vec3::new(0.0,0.0,1.0)
+        },
+        Tri{
+            p0: uv::Vec3::new(1.0, 0.0, -2.0), 
+            p1: uv::Vec3::new(1.0, 1.0, -2.0), 
+            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
+            n:  uv::Vec3::new(0.0,0.0,1.0)
+        },
+        Tri{
+            p0: uv::Vec3::new(1.0, 0.0, -2.0), 
+            p1: uv::Vec3::new(2.0, 0.0, -2.0), 
+            p2: uv::Vec3::new(1.0, 1.0, -2.0), 
+            n:  uv::Vec3::new(0.0,0.0,1.0)
+        },
+        Tri{
+            p0: uv::Vec3::new(0.0, 1.0, -2.0), 
+            p1: uv::Vec3::new(1.0, 1.0, -2.0), 
+            p2: uv::Vec3::new(0.0, 2.0, -2.0), 
+            n:  uv::Vec3::new(0.0,0.0,1.0)
+        },        
+        Tri{
+            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
+            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
+            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
+            n:  uv::Vec3::new(0.0,0.0,1.0)
+        },
+        Tri{
+            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
+            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
+            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
+            n:  uv::Vec3::new(0.0,0.0,1.0)
+        },
+        Tri{
+            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
+            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
+            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
+            n:  uv::Vec3::new(0.0,0.0,1.0)
+        },
+        Tri{
+            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
+            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
+            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
+            n:  uv::Vec3::new(0.0,0.0,1.0)
+        }
+        ];
+
+
+        let mut p0: [uv::Vec3; 8] = Default::default();
+        let mut p1: [uv::Vec3; 8] = Default::default();
+        let mut p2: [uv::Vec3; 8] = Default::default();
+        let mut n:  [uv::Vec3; 8] = Default::default();
+        for (i, tri) in test_tris.iter().enumerate(){
+            p0[i] = tri.p0;
+            p1[i] = tri.p1;
+            p2[i] = tri.p2;
+            n[i]  = tri.n;
+        }
+
+        Trix8{
+            p0: uv::Vec3x8::from(p0),
+            p1: uv::Vec3x8::from(p1),
+            p2: uv::Vec3x8::from(p2),
+            n
+        }
+}
+
+// #[bench]
+// fn bench_simd_tris(b: &mut Bencher){
+//     let test_ray: Ray = Ray { 
+//         o: uv::Vec3::new( 0.0, 0.0, 0.0),
+//         d: uv::Vec3::new( 0.0, 0.0,-1.0)
+//     };
+//         b.iter(||{
+//             Some((&create_test_tri_cluster(), &test_ray)).into_iter().map(tri_vec_intersect_8).collect::<Vec<uv::f32x8>>()
+//         });
+// }
+
+use std::fs::File;
+use std::io::prelude::*;
+use std::io::BufReader;
+use std::path::Path;
+use std::collections::hash_set::HashSet;
+
+fn model_loader() -> Vec<Trix8>
+{
+    println!("Loading Model");
+    // Create a path to the file
+    let path = Path::new("models/teapot.obj");
+    let display = path.display();
+
+    // Open the path in read-only mode, returns `io::Result<File>`
+    let mut file = match File::open(&path) {
+        Err(why) => panic!("couldn't open {}: {}", display, why),
+        Ok(file) => file,
+    };
+
+    let reader = BufReader::new(file);
+    
+    let mut faces: Vec<(u32, u32, u32)> = Vec::new();
+    let mut verts: Vec<uv::Vec3> = Vec::new();
+    let mut faces_on_vert:Vec<Vec<u32>> = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.unwrap();
+        let mut line_iter = line.split_ascii_whitespace();
+        
+
+
+        let mext = line_iter.next();
+
+        match mext {
+            Some("v") => {
+                verts.push(uv::Vec3::new(
+                    line_iter.next().unwrap().parse::<f32>().unwrap(),
+                    line_iter.next().unwrap().parse::<f32>().unwrap(),
+                    line_iter.next().unwrap().parse::<f32>().unwrap(),
+                ));
+
+                faces_on_vert.push(Vec::new());
+            },
+            Some("f") => {
+                let attached_verts = (
+                    line_iter.next().unwrap().parse::<u32>().unwrap()-1,
+                    line_iter.next().unwrap().parse::<u32>().unwrap()-1,
+                    line_iter.next().unwrap().parse::<u32>().unwrap()-1,
+                );
+                let i = faces.len() as u32;
+                faces_on_vert[attached_verts.0 as usize].push(i);
+                faces_on_vert[attached_verts.1 as usize].push(i);
+                faces_on_vert[attached_verts.2 as usize].push(i);
+                faces.push(attached_verts);
+            },
+            Some(&_) => {},
+            None => {}
+        }
+    }
+
+    println!("Creating Clusters");
+    let mut remaining_faces: HashSet<u32> = (0..faces.len() as u32).collect();
+    let mut clusters: Vec<Vec<u32>> = Vec::new();
+    while remaining_faces.len() > 0 {
+        let mut i: u32 = 0;
+        
+        let mut cluster: Vec<u32> = vec![remaining_faces.take(&remaining_faces.iter().next().cloned().unwrap()).unwrap()];
+
+        let mut connected_faces = Vec::new();
+            
+
+
+        'cluster_loop: while cluster.len() < 8{
+            while connected_faces.len() == 0 {
+                if i==cluster.len() as u32 {
+                    break 'cluster_loop;
+                }
+                let face_verts = faces[cluster[i as usize] as usize];
+                connected_faces.append(&mut faces_on_vert[face_verts.0 as usize].clone());
+                connected_faces.append(&mut faces_on_vert[face_verts.1 as usize].clone());
+                connected_faces.append(&mut faces_on_vert[face_verts.2 as usize].clone());
+                i+=1;
+ 
+                
+            }
+            let face: u32 = connected_faces.pop().unwrap();
+            if connected_faces.contains(&face) || !remaining_faces.contains(&face)
+                { continue;}
+            remaining_faces.remove(&face);
+            cluster.push(face)
+        }
+        clusters.push(cluster)
+    }
+    println!("Packing Cluster Data");
+    let mut triangle_clusters: Vec<Trix8> = Vec::new();
+    for cluster in clusters.iter() {
+        let mut p0: [uv::Vec3; 8] = Default::default();
+        let mut p1: [uv::Vec3; 8] = Default::default();
+        let mut p2: [uv::Vec3; 8] = Default::default();
+        let mut n:  [uv::Vec3; 8] = Default::default();
+        for (i, v) in cluster.iter().enumerate() {
+            let face = faces[*v as usize];
+            let offset = uv::Vec3::new(0.0,-2.0,-5.0);
+            p0[i] = verts[face.0 as usize]+offset;
+            p1[i] = verts[face.1 as usize]+offset;
+            p2[i] = verts[face.2 as usize]+offset;
+            n[i]  = (p1[i]-p0[i]).cross(p2[i]-p0[i]).normalized();
+        }
+        triangle_clusters.push(Trix8{
+            p0: uv::Vec3x8::from(p0),
+            p1: uv::Vec3x8::from(p1),
+            p2: uv::Vec3x8::from(p2),
+            n
+        });
+    }
+    println!("Loading Done!");
+    triangle_clusters
+
+}
+
+
+
 fn main(){
     // Scene creation
     let test_floor = PlaneRenderObject{
         plane: Plane{
-            o: uv::Vec3::new(0.0,-1.0,0.0),
+            o: uv::Vec3::new(0.0,-2.0,0.0),
             n: uv::Vec3::new(0.0,1.0,0.0)
         },
         mat: Box::new(Diffuse{
-            col: uv::Vec3::new(0.7,0.3,0.3),
+            col: uv::Vec3::new(1.0,1.0,1.0),
             roughness: 1.0
         })
     };
@@ -306,17 +782,53 @@ fn main(){
         })
     };
     
+    let test_tri = TriRenderObject{
+        tri: Tri { 
+            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
+            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
+            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
+            n:  uv::Vec3::new(0.0,0.0,1.0)
+        },
+        mat: Box::new(Diffuse{
+            col: uv::Vec3::new(0.5,1.0,0.5),
+            roughness: 1.0
+        })
+    };
+    let test_tri_cluster = TriClusterRenderObject{
+        tris: create_test_tri_cluster(),
+        mat: Box::new(Diffuse{
+            col: uv::Vec3::new(0.5,1.0,0.5),
+            roughness: 1.0
+        })
+    };
+
+    let model_tris = model_loader();
+
+    let mut test_model: Vec<Box<dyn Hittable>> = Vec::with_capacity(model_tris.len());
+    for tri_cluster in model_tris.into_iter() {
+        test_model.push(Box::new(
+            TriClusterRenderObject { 
+            tris: tri_cluster, 
+            mat: Box::new(Emmisive{
+                col: uv::Vec3::new(fastrand::f32(),fastrand::f32(),fastrand::f32()),
+                }) 
+            }
+        ));
+    }
+    test_model.push(Box::new(test_floor));
+
     let renderObjectList = RenderObjectList{
-        objects: vec![
-            Box::new(test_floor),
-            Box::new(test_sphere),
-            Box::new(test_sphere_2)
-        ]
+            objects: test_model
+        // objects: vec![
+        //     //Box::new(test_floor),
+        //     //Box::new(test_sphere),
+        //     //Box::new(test_sphere_2),
+        //     Box::new(test_model)]
     };
 
     let imgx = 512;
     let imgy = 512;
-    let samples = 128;
+    let samples = 32;
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
