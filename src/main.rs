@@ -7,6 +7,7 @@ use uv::Lerp;
 extern crate test;
 use test::Bencher;
 use uv::Vec3;
+use uv::Vec3x8;
 
 const EPSILON:  f32 = 0.00001;
 
@@ -252,6 +253,7 @@ impl Hittable for RenderObjectList{
 struct BvhNode{
     bound: Option<Aabb>,
     subnodes: Option<Vec<u32>>,
+    subnode_bounds: Option<(uv::Vec3x8, uv::Vec3x8)>,
     leaf: Option<u32>
 }
 
@@ -261,20 +263,27 @@ struct RenderObjectBVH{
 }
 
 impl RenderObjectBVH{
-    fn bounding_volume(&self, idx: u32) -> Aabb {
+    fn bounding_volume(mut self: &mut Self, idx: u32) -> &mut Self{
         let mut min = uv::Vec3::new(f32::MAX, f32::MAX, f32::MAX);
         let mut max = uv::Vec3::new(f32::MIN, f32::MIN, f32::MIN);
-        for subnode in self.nodes[idx as usize].subnodes.as_ref().unwrap() {
+        for subnode in self.nodes[idx as usize].subnodes.clone().unwrap() {
             if self.nodes[subnode.clone() as usize].bound.is_none() {
-                self.bounding_volume(subnode.clone());
+                self = RenderObjectBVH::bounding_volume(self,subnode.clone());
             }
+
             min = min.min_by_component(self.nodes[subnode.clone() as usize].bound.unwrap().0);
             max = max.min_by_component(self.nodes[subnode.clone() as usize].bound.unwrap().0);
         }
-        (min, max)
+        let target_node = &mut self.nodes[idx as usize];
+        target_node.bound = Some((min,max));
+        self
     }
 
     fn split_nodes(&self, mut nodes: Vec<u32>, axis: usize) -> (Vec<u32>, Vec<u32>){
+        if(nodes.len()<=8){
+            return (nodes, vec![]);
+        }
+        
         nodes.sort_by(|a, b|{
             (self.nodes[a.clone() as usize].bound.unwrap().0[axis]
             +self.nodes[a.clone() as usize].bound.unwrap().1[axis]).
@@ -300,15 +309,19 @@ impl RenderObjectBVH{
         let mut subnodes: Vec<u32> = Vec::new();
 
 
-        for nodes in [a,b,c,d,e,f,g,h]{
-            if nodes.len() > 0{
+        for node in [a,b,c,d,e,f,g,h]{
+            if node.len() > 0{
+                if(node.len()<4){
+                    print!("how?");
+                }
+
                 subnodes.push(
                     self.nodes.len() as u32
                 );
                 self.nodes.push(
                     BvhNode{
                         bound: None,
-                        subnodes: Some(nodes),
+                        subnodes: Some(node),
                         leaf: None
                     }
                 );
@@ -336,6 +349,12 @@ impl RenderObjectBVH{
             )
         }
 
+        self.nodes[0].subnodes = Some(leaves);
+
+
+        if self.nodes[0].subnodes.as_ref().unwrap().len() <= 8{
+            return;
+        }
 
         // Check sub node count
         let mut remaining_nodes = vec![0u32];
@@ -344,11 +363,19 @@ impl RenderObjectBVH{
             let parent = remaining_nodes.pop().unwrap();
             self.bin_children(parent);
             for node in self.nodes[parent as usize].subnodes.as_ref().unwrap(){
-                if self.nodes[node.clone() as usize].subnodes.as_ref().unwrap().len()>1{ // >8?
+                if self.nodes[node.clone() as usize].subnodes.as_ref().unwrap().len()>8{ // >8?
                     remaining_nodes.push(*node);
                 }
             }
         }
+
+        println!("Counting tree");
+        for node in self.nodes.iter(){
+            if node.subnodes.is_none(){continue;}
+            println!("{}", node.subnodes.as_ref().unwrap().len());
+        }
+
+
         self.bounding_volume(0);
     }
 }
@@ -959,10 +986,12 @@ fn main(){
     //     //     Box::new(test_model)]
     // };
 
-    let render_object_bvh = RenderObjectBVH{
+    let mut render_object_bvh = RenderObjectBVH{
         objects: test_model,
         nodes: vec![]
     };
+
+    render_object_bvh.update_bvh();
 
     let imgx = 512;
     let imgy = 512;
