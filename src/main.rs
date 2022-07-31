@@ -8,6 +8,9 @@ extern crate test;
 use test::Bencher;
 use uv::Vec3;
 
+const EPSILON:  f32 = 0.00001;
+
+
 // Basic data structs
 struct Ray{
     o: uv::Vec3,
@@ -24,14 +27,15 @@ struct Plane{
     n: uv::Vec3
 }
 
-struct Aabb{
-    p1: uv::Vec3,
-    p2: uv::Vec3
-}
+type Aabb = (uv::Vec3, uv::Vec3);
 
 // Render Objects 
 trait Hittable{
     fn ray_test(&self, ray: &Ray) -> Option<Hit>;
+}
+
+trait Bounded{
+    fn bounding_volume(&self) -> Aabb;
 }
 
 struct Hit<'a>{
@@ -188,6 +192,30 @@ impl Hittable for TriClusterRenderObject{
         })
     }
 }
+
+impl Bounded for TriClusterRenderObject{
+    fn bounding_volume(&self) -> Aabb {
+        let start = self.tris.p0.
+            min_by_component(self.tris.p1).
+            min_by_component(self.tris.p2);
+        
+        let end = self.tris.p0.
+            max_by_component(self.tris.p1).
+            max_by_component(self.tris.p2);
+
+        
+        ( uv::Vec3::new(
+                <[f32; 8]>::from(start.x).into_iter().reduce(f32::min).unwrap()-EPSILON,
+                <[f32; 8]>::from(start.y).into_iter().reduce(f32::min).unwrap()-EPSILON,
+                <[f32; 8]>::from(start.z).into_iter().reduce(f32::min).unwrap()-EPSILON
+            ),uv::Vec3::new(
+                <[f32; 8]>::from(end.x).into_iter().reduce(f32::max).unwrap()+EPSILON,
+                <[f32; 8]>::from(end.y).into_iter().reduce(f32::max).unwrap()+EPSILON,
+                <[f32; 8]>::from(end.z).into_iter().reduce(f32::max).unwrap()+EPSILON
+        ))
+        
+    }
+}
  
 
 struct RenderObjectList{
@@ -219,6 +247,118 @@ impl Hittable for RenderObjectList{
     }
 }
 
+
+
+struct BvhNode{
+    bound: Option<Aabb>,
+    subnodes: Option<Vec<BvhNode>>,
+    leaf: Option<u32>
+}
+
+impl BvhNode{
+    fn bin_children(mut self) -> Self{
+        let (a,e) = RenderObjectBVH::split_nodes(self.subnodes.unwrap(), 0);
+        let (a,c) = RenderObjectBVH::split_nodes(a, 1);
+        let (a,b) = RenderObjectBVH::split_nodes(a, 2);
+        let (c,d) = RenderObjectBVH::split_nodes(c, 2);
+
+        let (e,g) = RenderObjectBVH::split_nodes(e, 1);
+        let (e,f) = RenderObjectBVH::split_nodes(e, 2);
+        let (g,h) = RenderObjectBVH::split_nodes(g, 2);
+ 
+        self.subnodes = Some(Vec::new());
+
+
+        for nodes in [a,b,c,d,e,f,g,h]{
+            if nodes.len() > 0{
+                self.subnodes.as_mut().unwrap().push(
+                    BvhNode{
+                        bound: None,
+                        subnodes: Some(nodes),
+                        leaf: None
+                    }
+                )
+            }
+        }
+        self
+    }
+}
+
+impl Bounded for BvhNode{
+    fn bounding_volume(self: &BvhNode) -> Aabb {
+        let mut min = uv::Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut max = uv::Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+        for subnode in self.subnodes.as_ref().unwrap().iter() {
+            if subnode.bound.is_none() {
+                subnode.bounding_volume();
+            }
+            min = min.min_by_component(subnode.bound.unwrap().0);
+            max = max.min_by_component(subnode.bound.unwrap().0);
+        }
+        (min, max)
+    }
+}
+
+struct RenderObjectBVH{
+    objects: Vec<Box<dyn Bounded>>,
+    nodes: Vec<BvhNode>,
+}
+
+impl RenderObjectBVH{
+
+    fn split_nodes(mut nodes: Vec<BvhNode>, axis: usize) -> (Vec<BvhNode>, Vec<BvhNode>){
+        nodes.sort_by(|a, b|{
+            (a.bound.unwrap().0[axis]+a.bound.unwrap().1[axis]).
+            partial_cmp(&(b.bound.unwrap().0[axis]+b.bound.unwrap().1[axis])).
+            unwrap()
+        });
+
+        let split  = nodes.split_off(nodes.len()/2);
+        (nodes,split)
+
+    }
+
+
+
+    fn update_bvh(&mut self){
+        let mut leaves: Vec<BvhNode> = Vec::new();
+        for (i, object) in self.objects.iter().enumerate(){
+            leaves.push(
+                BvhNode { 
+                    bound: Some(object.bounding_volume()),
+                    leaf: Some(i as u32),
+                    subnodes: None
+                }
+            )
+        }
+
+        self.root = BvhNode{
+            bound: None,
+            subnodes: Some(leaves),
+            leaf: None
+        };
+
+        let mut remaining_nodes = vec![&self.root];
+
+        while remaining_nodes.len() > 0 {
+            let parent = remaining_nodes.pop().unwrap();
+            parent.bin_children();
+            for node in parent.subnodes.unwrap().iter(){
+                if node.subnodes.as_ref().unwrap().len()>1{
+                    remaining_nodes.push(node);
+                }
+            }
+        }
+        
+        self.root.bounding_volume();
+    }
+}
+
+impl Hittable for RenderObjectBVH{
+    fn ray_test(&self, ray: &Ray) -> Option<Hit> {
+        None
+    }
+}
 
 // Materials
 trait Material{
@@ -394,8 +534,6 @@ impl Splat for Rayx8{
 }
 
 fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
-    const EPSILON:  f32 = 0.00001;
-
     let (edge1, edge2, h, s, q): (uv::Vec3, uv::Vec3, uv::Vec3, uv::Vec3, uv::Vec3);
     let (a,f,u,v): (f32, f32, f32, f32);
     edge1 = tri.p1 - tri.p0;
@@ -426,7 +564,7 @@ fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
 }
 
 fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
-    let EPSILON:  uv::f32x8 = uv::f32x8::splat(0.00001);
+    let EPSILONx8:  uv::f32x8 = uv::f32x8::splat(0.00001);
     let ray: Rayx8= Rayx8::splat(ray_single);
     let (edge1, edge2, h, s, q): (uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8);
     let (a,f,u,v): (uv::f32x8, uv::f32x8, uv::f32x8, uv::f32x8);
@@ -436,10 +574,7 @@ fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
     a = edge1.dot(h);
 
 
-    let test_1 = a.cmp_gt(EPSILON);
-    let test_2 = a.cmp_lt(EPSILON);
-
-    let invalid = a.cmp_gt(-EPSILON) & a.cmp_lt(EPSILON);
+    let invalid = a.cmp_gt(-EPSILONx8) & a.cmp_lt(EPSILONx8);
     // if -EPSILON < a && a < EPSILON
     //     { return f32::MAX; }   // This ray is parallel to this triangle.
     
@@ -466,13 +601,11 @@ fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
     let t = f * edge2.dot(q);
 
     // This means that there is a line intersection but not a ray intersection.
-    let invalid = invalid | t.cmp_le(EPSILON);
+    let invalid = invalid | t.cmp_le(EPSILONx8);
     // if t <= EPSILON 
     //    { return f32::MAX; }
     
-    let t_f = invalid.blend(uv::f32x8::splat(f32::MAX), t);
-    let t_f = t_f;
-    return t_f;
+    invalid.blend(uv::f32x8::splat(f32::MAX), t)
 }
 
 fn tri_vec_intersect( 
@@ -631,6 +764,7 @@ fn create_test_tri_cluster() -> Trix8 {
 //         });
 // }
 
+use std::default;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
