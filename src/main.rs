@@ -251,52 +251,8 @@ impl Hittable for RenderObjectList{
 
 struct BvhNode{
     bound: Option<Aabb>,
-    subnodes: Option<Vec<BvhNode>>,
+    subnodes: Option<Vec<u32>>,
     leaf: Option<u32>
-}
-
-impl BvhNode{
-    fn bin_children(mut self) -> Self{
-        let (a,e) = RenderObjectBVH::split_nodes(self.subnodes.unwrap(), 0);
-        let (a,c) = RenderObjectBVH::split_nodes(a, 1);
-        let (a,b) = RenderObjectBVH::split_nodes(a, 2);
-        let (c,d) = RenderObjectBVH::split_nodes(c, 2);
-
-        let (e,g) = RenderObjectBVH::split_nodes(e, 1);
-        let (e,f) = RenderObjectBVH::split_nodes(e, 2);
-        let (g,h) = RenderObjectBVH::split_nodes(g, 2);
- 
-        self.subnodes = Some(Vec::new());
-
-
-        for nodes in [a,b,c,d,e,f,g,h]{
-            if nodes.len() > 0{
-                self.subnodes.as_mut().unwrap().push(
-                    BvhNode{
-                        bound: None,
-                        subnodes: Some(nodes),
-                        leaf: None
-                    }
-                )
-            }
-        }
-        self
-    }
-}
-
-impl Bounded for BvhNode{
-    fn bounding_volume(self: &BvhNode) -> Aabb {
-        let mut min = uv::Vec3::new(f32::MAX, f32::MAX, f32::MAX);
-        let mut max = uv::Vec3::new(f32::MIN, f32::MIN, f32::MIN);
-        for subnode in self.subnodes.as_ref().unwrap().iter() {
-            if subnode.bound.is_none() {
-                subnode.bounding_volume();
-            }
-            min = min.min_by_component(subnode.bound.unwrap().0);
-            max = max.min_by_component(subnode.bound.unwrap().0);
-        }
-        (min, max)
-    }
 }
 
 struct RenderObjectBVH{
@@ -305,25 +261,73 @@ struct RenderObjectBVH{
 }
 
 impl RenderObjectBVH{
+    fn bounding_volume(&self, idx: u32) -> Aabb {
+        let mut min = uv::Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut max = uv::Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+        for subnode in self.nodes[idx as usize].subnodes.as_ref().unwrap() {
+            if self.nodes[subnode.clone() as usize].bound.is_none() {
+                self.bounding_volume(subnode.clone());
+            }
+            min = min.min_by_component(self.nodes[subnode.clone() as usize].bound.unwrap().0);
+            max = max.min_by_component(self.nodes[subnode.clone() as usize].bound.unwrap().0);
+        }
+        (min, max)
+    }
 
-    fn split_nodes(mut nodes: Vec<BvhNode>, axis: usize) -> (Vec<BvhNode>, Vec<BvhNode>){
+    fn split_nodes(&self, mut nodes: Vec<u32>, axis: usize) -> (Vec<u32>, Vec<u32>){
         nodes.sort_by(|a, b|{
-            (a.bound.unwrap().0[axis]+a.bound.unwrap().1[axis]).
-            partial_cmp(&(b.bound.unwrap().0[axis]+b.bound.unwrap().1[axis])).
+            (self.nodes[a.clone() as usize].bound.unwrap().0[axis]
+            +self.nodes[a.clone() as usize].bound.unwrap().1[axis]).
+            partial_cmp(&(self.nodes[b.clone() as usize].bound.unwrap().0[axis]+
+            self.nodes[b.clone() as usize].bound.unwrap().1[axis])).
             unwrap()
         });
 
         let split  = nodes.split_off(nodes.len()/2);
         (nodes,split)
-
     }
 
+    fn bin_children(&mut self, idx: u32){
+        let (a,e) = self.split_nodes(self.nodes[idx as usize].subnodes.as_ref().unwrap().clone(), 0);
+        let (a,c) = self.split_nodes(a, 1);
+        let (a,b) = self.split_nodes(a, 2);
+        let (c,d) = self.split_nodes(c, 2);
 
+        let (e,g) = self.split_nodes(e, 1);
+        let (e,f) = self.split_nodes(e, 2);
+        let (g,h) = self.split_nodes(g, 2);
+ 
+        let mut subnodes: Vec<u32> = Vec::new();
+
+
+        for nodes in [a,b,c,d,e,f,g,h]{
+            if nodes.len() > 0{
+                subnodes.push(
+                    self.nodes.len() as u32
+                );
+                self.nodes.push(
+                    BvhNode{
+                        bound: None,
+                        subnodes: Some(nodes),
+                        leaf: None
+                    }
+                );
+            }
+        }
+        self.nodes[idx as usize].subnodes = Some(subnodes);
+    }
 
     fn update_bvh(&mut self){
-        let mut leaves: Vec<BvhNode> = Vec::new();
+        self.nodes = vec![BvhNode{
+            bound: None,
+            subnodes: None,
+            leaf: None
+        }];
+
+        let mut leaves: Vec<u32> = Vec::new();
         for (i, object) in self.objects.iter().enumerate(){
-            leaves.push(
+            leaves.push(self.nodes.len() as u32);
+            self.nodes.push(
                 BvhNode { 
                     bound: Some(object.bounding_volume()),
                     leaf: Some(i as u32),
@@ -332,25 +336,20 @@ impl RenderObjectBVH{
             )
         }
 
-        self.root = BvhNode{
-            bound: None,
-            subnodes: Some(leaves),
-            leaf: None
-        };
 
-        let mut remaining_nodes = vec![&self.root];
+
+        let mut remaining_nodes = vec![0u32];
 
         while remaining_nodes.len() > 0 {
             let parent = remaining_nodes.pop().unwrap();
-            parent.bin_children();
-            for node in parent.subnodes.unwrap().iter(){
-                if node.subnodes.as_ref().unwrap().len()>1{
-                    remaining_nodes.push(node);
+            self.bin_children(parent);
+            for node in self.nodes[parent as usize].subnodes.as_ref().unwrap(){
+                if self.nodes[node.clone() as usize].subnodes.as_ref().unwrap().len()>1{
+                    remaining_nodes.push(*node);
                 }
             }
         }
-        
-        self.root.bounding_volume();
+        self.bounding_volume(0);
     }
 }
 
@@ -938,7 +937,7 @@ fn main(){
 
     let model_tris = model_loader();
 
-    let mut test_model: Vec<Box<dyn Hittable>> = Vec::with_capacity(model_tris.len());
+    let mut test_model: Vec<Box<dyn Bounded>> = Vec::with_capacity(model_tris.len());
     for tri_cluster in model_tris.into_iter() {
         test_model.push(Box::new(
             TriClusterRenderObject { 
@@ -949,15 +948,20 @@ fn main(){
             }
         ));
     }
-    test_model.push(Box::new(test_floor));
+    //test_model.push(Box::new(test_floor));
 
-    let renderObjectList = RenderObjectList{
-            objects: test_model
-        // objects: vec![
-        //     //Box::new(test_floor),
-        //     //Box::new(test_sphere),
-        //     //Box::new(test_sphere_2),
-        //     Box::new(test_model)]
+    // let renderObjectList = RenderObjectList{
+    //         objects: test_model
+    //     // objects: vec![
+    //     //     //Box::new(test_floor),
+    //     //     //Box::new(test_sphere),
+    //     //     //Box::new(test_sphere_2),
+    //     //     Box::new(test_model)]
+    // };
+
+    let render_object_bvh = RenderObjectBVH{
+        objects: test_model,
+        nodes: vec![]
     };
 
     let imgx = 512;
@@ -974,7 +978,7 @@ fn main(){
             };
             let mut col: uv::Vec3 = uv::Vec3::new(0.0,0.0,0.0);
             for  _ in 0..samples {
-                col += trace_ray(&ray, &renderObjectList, 4)/(samples as f32);
+                col += trace_ray(&ray, &render_object_bvh, 4)/(samples as f32);
             }
 
 
