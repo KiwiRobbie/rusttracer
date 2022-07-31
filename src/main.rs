@@ -337,14 +337,14 @@ impl RenderObjectBVH{
         }
 
 
-
+        // Check sub node count
         let mut remaining_nodes = vec![0u32];
 
         while remaining_nodes.len() > 0 {
             let parent = remaining_nodes.pop().unwrap();
             self.bin_children(parent);
             for node in self.nodes[parent as usize].subnodes.as_ref().unwrap(){
-                if self.nodes[node.clone() as usize].subnodes.as_ref().unwrap().len()>1{
+                if self.nodes[node.clone() as usize].subnodes.as_ref().unwrap().len()>1{ // >8?
                     remaining_nodes.push(*node);
                 }
             }
@@ -391,7 +391,7 @@ impl Default for Diffuse{
 impl Material for Glossy{
     fn scatter(&self, ray: &Ray, hit: &Hit) -> Option<Ray> {
         Some(Ray{
-            o: hit.pos + hit.norm * 0.00001,
+            o: hit.pos + hit.norm * EPSILON,
             d: ray.d-2.0*(ray.d.dot(hit.norm))*hit.norm
         })
     }
@@ -416,8 +416,8 @@ impl Material for Diffuse{
         }
         
         Some(Ray{
-            o: hit.pos+hit.norm*0.00001,
-            d: (hit.norm*1.00001 + random_unit.normalized()).normalized()
+            o: hit.pos+hit.norm*EPSILON,
+            d: (hit.norm*(1.0+EPSILON) + random_unit.normalized()).normalized()
         })
     }
 
@@ -563,7 +563,7 @@ fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
 }
 
 fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
-    let EPSILONx8:  uv::f32x8 = uv::f32x8::splat(0.00001);
+    let EPSILONx8:  uv::f32x8 = uv::f32x8::splat(EPSILON);
     let ray: Rayx8= Rayx8::splat(ray_single);
     let (edge1, edge2, h, s, q): (uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8);
     let (a,f,u,v): (uv::f32x8, uv::f32x8, uv::f32x8, uv::f32x8);
