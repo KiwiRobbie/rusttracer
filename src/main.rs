@@ -8,6 +8,17 @@ extern crate test;
 use test::Bencher;
 use uv::Vec3;
 use uv::Vec3x8;
+use std::time::{Duration, Instant};
+use std::rc::Rc;
+
+use std::default;
+use std::fs::File;
+use std::io::prelude::*;
+use std::io::BufReader;
+use std::io::BufWriter;
+use std::path::Path;
+use std::collections::hash_set::HashSet;
+
 
 const EPSILON:  f32 = 0.00001;
 
@@ -33,9 +44,6 @@ type Aabb = (uv::Vec3, uv::Vec3);
 // Render Objects 
 trait Hittable{
     fn ray_test(&self, ray: &Ray) -> Option<Hit>;
-}
-
-trait Bounded{
     fn bounding_volume(&self) -> Aabb;
 }
 
@@ -53,11 +61,12 @@ impl Hittable for NullRenderObject{
     fn ray_test(&self, _ray: &Ray) -> Option<Hit> {
         None
     }
+    fn bounding_volume(&self) -> Aabb{Default::default()}
 }
 
 struct PlaneRenderObject{
     plane: Plane,
-    mat: Box<dyn Material>
+    mat: Rc<dyn Material>
 }
 
 impl PlaneRenderObject{
@@ -82,11 +91,12 @@ impl Hittable for PlaneRenderObject{
         }
         None
     }
+    fn bounding_volume(&self) -> Aabb{Default::default()}
 }
 
 struct SphereRenderObject{
     sphere: Sphere,
-    mat: Box<dyn Material>
+    mat: Rc<dyn Material>
 }
 impl SphereRenderObject{
  fn ray_sphere_intersect(
@@ -140,11 +150,12 @@ impl Hittable for SphereRenderObject{
             mat: &*self.mat
         })
     }
+    fn bounding_volume(&self) -> Aabb{Default::default()}
 }
 
 struct TriRenderObject{
     tri: Tri, 
-    mat: Box<dyn Material>
+    mat: Rc<dyn Material>
 }
 
 impl Hittable for TriRenderObject{
@@ -162,11 +173,12 @@ impl Hittable for TriRenderObject{
             mat: &*self.mat
         })
     }
+    fn bounding_volume(&self) -> Aabb{Default::default()}
 }
 
 struct TriClusterRenderObject{
     tris: Trix8, 
-    mat: Box<dyn Material>
+    mat: Rc<dyn Material>
 }
 
 impl Hittable for TriClusterRenderObject{
@@ -192,28 +204,27 @@ impl Hittable for TriClusterRenderObject{
             mat: &*self.mat
         })
     }
-}
 
-impl Bounded for TriClusterRenderObject{
     fn bounding_volume(&self) -> Aabb {
-        let start = self.tris.p0.
-            min_by_component(self.tris.p1).
-            min_by_component(self.tris.p2);
-        
-        let end = self.tris.p0.
-            max_by_component(self.tris.p1).
-            max_by_component(self.tris.p2);
 
-        
-        ( uv::Vec3::new(
-                <[f32; 8]>::from(start.x).into_iter().reduce(f32::min).unwrap()-EPSILON,
-                <[f32; 8]>::from(start.y).into_iter().reduce(f32::min).unwrap()-EPSILON,
-                <[f32; 8]>::from(start.z).into_iter().reduce(f32::min).unwrap()-EPSILON
-            ),uv::Vec3::new(
-                <[f32; 8]>::from(end.x).into_iter().reduce(f32::max).unwrap()+EPSILON,
-                <[f32; 8]>::from(end.y).into_iter().reduce(f32::max).unwrap()+EPSILON,
-                <[f32; 8]>::from(end.z).into_iter().reduce(f32::max).unwrap()+EPSILON
-        ))
+        let p0: [uv::Vec3; 8] = self.tris.p0.into();
+        let p1: [uv::Vec3; 8] = self.tris.p1.into();
+        let p2: [uv::Vec3; 8] = self.tris.p2.into();
+
+        let mut pts = p0.to_vec();
+        pts.append(&mut p1.to_vec());
+        pts.append(&mut p2.to_vec());
+        let filtered = pts.iter().
+        filter(|n| !n.x.is_nan()).collect::<Vec<&uv::Vec3>>();
+
+        let mut min = uv::Vec3::new(f32::MAX,f32::MAX,f32::MAX);
+        let mut max = uv::Vec3::new(f32::MIN,f32::MIN,f32::MIN);
+
+        for v in filtered{
+            min = min.min_by_component(v.clone());
+            max = max.max_by_component(v.clone());
+        }
+        (min, max)
         
     }
 }
@@ -246,6 +257,7 @@ impl Hittable for RenderObjectList{
         }
         hit
     }
+    fn bounding_volume(&self) -> Aabb{Default::default()}
 }
 
 
@@ -253,13 +265,13 @@ impl Hittable for RenderObjectList{
 struct BvhNode{
     bound: Option<Aabb>,
     subnodes: Option<Vec<u32>>,
-    subnode_bounds: Option<(uv::Vec3x8, uv::Vec3x8)>,
     leaf: Option<u32>
 }
 
 struct RenderObjectBVH{
-    objects: Vec<Box<dyn Bounded>>,
+    objects: Vec<Box<dyn Hittable>>,
     nodes: Vec<BvhNode>,
+    mat: Rc<dyn Material>
 }
 
 impl RenderObjectBVH{
@@ -272,7 +284,7 @@ impl RenderObjectBVH{
             }
 
             min = min.min_by_component(self.nodes[subnode.clone() as usize].bound.unwrap().0);
-            max = max.min_by_component(self.nodes[subnode.clone() as usize].bound.unwrap().0);
+            max = max.max_by_component(self.nodes[subnode.clone() as usize].bound.unwrap().1);
         }
         let target_node = &mut self.nodes[idx as usize];
         target_node.bound = Some((min,max));
@@ -311,10 +323,6 @@ impl RenderObjectBVH{
 
         for node in [a,b,c,d,e,f,g,h]{
             if node.len() > 0{
-                if(node.len()<4){
-                    print!("how?");
-                }
-
                 subnodes.push(
                     self.nodes.len() as u32
                 );
@@ -368,22 +376,113 @@ impl RenderObjectBVH{
                 }
             }
         }
+        self.bounding_volume(0);
 
-        println!("Counting tree");
+        return;
+        // for node in self.nodes.iter(){
+        //     if node.subnodes.is_none() {continue;}
+        //     println!("{}",node.subnodes.as_ref().unwrap().len());
+        // }
+
+        
+        println!("Writting bvh to file");
+        let f = File::create("models/bvh.obj").expect("Unable to create file");
+        let mut f = BufWriter::new(f);
+
+        let mut boxes = 0;
         for node in self.nodes.iter(){
-            if node.subnodes.is_none(){continue;}
-            println!("{}", node.subnodes.as_ref().unwrap().len());
+            if node.leaf.is_none() {continue;}
+            
+            boxes+=1;
+            let min = node.bound.unwrap().0;
+            let max: Vec3 = node.bound.unwrap().1;
+            
+            
+            for v in 0..8{
+                let x = if v%2==0 {min.x} else {max.x};
+                let y = if (v/2)%2==0 {min.y} else {max.y};
+                let z = if (v/4)%2==0 {min.z} else {max.z};
+                f.write_fmt(format_args!("v {:0.6} {:0.6} {:0.6}\n",x,y,z));
+            }
         }
 
+        for n in 0..boxes{
+            for (a,b) in [
+                (0,1),
+                (0,2),
+                (0,4),
+                (7,3),
+                (7,5),
+                (7,6),
+                (1,5),
+                (5,4),
+                (4,6),
+                (6,2),
+                (2,3),
+                (3,1)
+            ]{
+                let A = 1+n*8 + a;
+                let B = 1+n*8 + b;
+                f.write_fmt(format_args!("l {} {}\n",A ,B));
+            }
+        }
+        let a=0;
 
-        self.bounding_volume(0);
     }
 }
 
 impl Hittable for RenderObjectBVH{
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
-        None
+        // let bvh_start = Instant::now();
+        
+        let mut bvh_tests: Vec<u32> = vec![0];
+        let mut final_tests: Vec<u32> = vec![];
+        
+        while bvh_tests.len() > 0{
+            let node = bvh_tests.pop().unwrap();
+            if aabb_hit(
+                ray,
+                self.nodes[node.clone() as usize].bound.unwrap().0,
+                self.nodes[node.clone() as usize].bound.unwrap().1
+            ){
+                let hit_node = &self.nodes[node.clone() as usize]; 
+                if hit_node.subnodes.is_some() {
+                    bvh_tests.append(&mut hit_node.subnodes.as_ref().unwrap().clone())
+                }
+                if hit_node.leaf.is_some(){
+                    final_tests.push(hit_node.leaf.unwrap())
+                }
+            }
+        }
+        
+        // let bvh_duration = bvh_start.elapsed().as_nanos();
+        // let hits_found = final_tests.len();
+        // let final_start = Instant::now();
+        
+        let mut hit: Option<Hit> = None;
+        while final_tests.len() > 0{
+            let n = final_tests.pop().unwrap();
+            let temp_hit = self.objects[n as usize].as_ref().ray_test(ray);
+            if temp_hit.is_some() {
+                if hit.is_some(){
+                    if hit.as_ref().unwrap().t>temp_hit.as_ref().unwrap().t {
+                        hit=temp_hit;
+                    }
+                }else{
+                    hit = temp_hit;
+                }
+            }
+        }
+        // let final_duration = final_start.elapsed().as_nanos();
+        // let total_duration = final_duration + bvh_duration;
+        // if hit.is_some(){
+        //     println!("BVH traversed in: {}ns, {} possible hits found", bvh_duration, hits_found);
+        //     println!("Final tests took {}ns, total time {}ns\n", final_duration, total_duration);
+        // }
+        hit
     }
+    
+    fn bounding_volume(&self) -> Aabb{Default::default()}
 }
 
 // Materials
@@ -465,24 +564,64 @@ impl Material for Emmisive{
 }
 
 // BVH AABB 
-fn aabb_hit(r: Ray, t_min: f32, t_max: f32, min: uv::Vec3, max: uv::Vec3) -> bool {
-    for a in 0..3 {
-        let invD = 1.0 / r.d[a];
-        let mut t0 = (min[a] - r.o[a]) * invD;
-        let mut t1 = (max[a] - r.o[a]) * invD;
-        
-        if invD < 0.0
-        {
-            (t0, t1) = (t1,t0);
-        }
+fn aabb_hit(r: &Ray, min: uv::Vec3, max: uv::Vec3) -> bool {
 
-        let t_min = if t0 > t_min {t0} else {t_min};
-        let t_max = if t1 < t_max {t1} else {t_max};
-        if t_max <= t_min {
-            return false;
-        }
+
+
+        // r.dir is unit direction vector of ray
+    let dirfrac_x = 1.0 / r.d.x;
+    let dirfrac_y = 1.0 / r.d.y;
+    let dirfrac_z = 1.0 / r.d.z;
+    // lb is the corner of AABB with minimal coordinates - left bottom, rt is maximal corner
+    // r.org is origin of ray
+    let t1 = (min.x - r.o.x)*dirfrac_x;
+    let t2 = (max.x - r.o.x)*dirfrac_x;
+    let t3 = (min.y - r.o.y)*dirfrac_y;
+    let t4 = (max.y - r.o.y)*dirfrac_y;
+    let t5 = (min.z - r.o.z)*dirfrac_z;
+    let t6 = (max.z - r.o.z)*dirfrac_z;
+
+    let tmin = f32::max(f32::max(f32::min(t1, t2), f32::min(t3, t4)), f32::min(t5, t6));
+    let tmax = f32::min(f32::min(f32::max(t1, t2), f32::max(t3, t4)), f32::max(t5, t6));
+
+    // if tmax < 0, ray (line) is intersecting AABB, but the whole AABB is behind us
+    if (tmax < 0.0)
+    {
+        //t = tmax;
+        return false;
     }
-    true
+
+    // if tmin > tmax, ray doesn't intersect AABB
+    if (tmin > tmax)
+    {
+        //t = tmax;
+        return false;
+    }
+
+    //t = tmin;
+    return true;
+
+
+    // for a in 0..3 {
+    //     let t_min = EPSILON;
+    //     let t_max = f32::MAX; 
+
+    //     let invD = 1.0 / r.d[a];
+    //     let mut t0 = (min[a] - r.o[a]) * invD;
+    //     let mut t1 = (max[a] - r.o[a]) * invD;
+        
+    //     if invD < 0.0
+    //     {
+    //         (t0, t1) = (t1,t0);
+    //     }
+
+    //     let t_min = if t0 > t_min {t0} else {t_min};
+    //     let t_max = if t1 < t_max {t1} else {t_max};
+    //     if t_max <= t_min {
+    //         return false;
+    //     }
+    // }
+    // true
 }
 
 
@@ -499,7 +638,7 @@ fn sample_sky(ray: &Ray) -> uv::Vec3{
     let sky_sample = horizon.lerp(apex, ray.d.y.clamp(0.0,1.0)).lerp(ground, (-5.0 * ray.d.y).clamp(0.0, 1.0).powf(0.5));
     let sun_sample = if ray.d.dot(sun_dir) < 0.9 { uv::Vec3::new(0.0,0.0,0.0)}else{sun} ;
 
-    0.0*sky_sample + 2.0 * 0.0 *sun_sample
+    sky_sample + 2.0 * sun_sample
 }
 
 fn trace_ray(ray: &Ray, scene:&dyn Hittable, depth: i32) -> uv::Vec3{ 
@@ -627,7 +766,7 @@ fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
     let t = f * edge2.dot(q);
 
     // This means that there is a line intersection but not a ray intersection.
-    let invalid = invalid | t.cmp_le(EPSILONx8);
+    let invalid = invalid | t.cmp_le(EPSILONx8) | (tri.p0.x*uv::f32x8::ZERO);
     // if t <= EPSILON 
     //    { return f32::MAX; }
     
@@ -790,18 +929,12 @@ fn create_test_tri_cluster() -> Trix8 {
 //         });
 // }
 
-use std::default;
-use std::fs::File;
-use std::io::prelude::*;
-use std::io::BufReader;
-use std::path::Path;
-use std::collections::hash_set::HashSet;
 
 fn model_loader() -> Vec<Trix8>
 {
     println!("Loading Model");
-    // Create a path to the file
-    let path = Path::new("models/teapot.obj");
+    // Create a path to the file // sponza_simple
+    let path = Path::new("models/sponza_simple.obj");
     let display = path.display();
 
     // Open the path in read-only mode, returns `io::Result<File>`
@@ -886,27 +1019,57 @@ fn model_loader() -> Vec<Trix8>
     }
     println!("Packing Cluster Data");
     let mut triangle_clusters: Vec<Trix8> = Vec::new();
-    for cluster in clusters.iter() {
-        let mut p0: [uv::Vec3; 8] = Default::default();
-        let mut p1: [uv::Vec3; 8] = Default::default();
-        let mut p2: [uv::Vec3; 8] = Default::default();
-        let mut n:  [uv::Vec3; 8] = Default::default();
+    for (n,cluster) in clusters.iter().enumerate() {
+        let nan: [f32; 8] = uv::f32x8::splat(0.0).cmp_eq(uv::f32x8::splat(0.0)).into();
+        let nan = nan[0];
+
+        let nan3 = uv::Vec3::new(nan,nan,nan);
+        let mut p0: [uv::Vec3; 8] = [nan3;8];
+        let mut p1: [uv::Vec3; 8] = [nan3;8];
+        let mut p2: [uv::Vec3; 8] = [nan3;8];
+        let mut n:  [uv::Vec3; 8] = [nan3;8];
         for (i, v) in cluster.iter().enumerate() {
             let face = faces[*v as usize];
-            let offset = uv::Vec3::new(0.0,-2.0,-5.0);
+            let offset = uv::Vec3::new(0.0,0.0,-0.0);
             p0[i] = verts[face.0 as usize]+offset;
             p1[i] = verts[face.1 as usize]+offset;
             p2[i] = verts[face.2 as usize]+offset;
             n[i]  = (p1[i]-p0[i]).cross(p2[i]-p0[i]).normalized();
         }
-        triangle_clusters.push(Trix8{
+        let packed_cluster = Trix8{
             p0: uv::Vec3x8::from(p0),
             p1: uv::Vec3x8::from(p1),
             p2: uv::Vec3x8::from(p2),
             n
-        });
+        };
+        triangle_clusters.push(packed_cluster);
     }
     println!("Loading Done!");
+
+    // println!("Writing cluster objects");
+    // let f = File::create("models/clusters.obj").expect("Unable to create file");
+    // let mut f = BufWriter::new(f);
+
+    // for (n,cluster) in triangle_clusters.iter().enumerate(){
+    //     let p0: [uv::Vec3; 8] = cluster.p0.into();
+    //     let p1: [uv::Vec3; 8] = cluster.p1.into();
+    //     let p2: [uv::Vec3; 8] = cluster.p2.into();
+
+    //     let mut pts = p0.to_vec();
+    //     pts.append(&mut p1.to_vec());
+    //     pts.append(&mut p2.to_vec());
+
+    //     f.write_fmt(format_args!("o cluster {}\n",n));
+    //     for p in pts.iter(){
+    //         f.write_fmt(format_args!("v {:0.6} {:0.6} {:0.6}\n",p.x,p.y,p.z));
+    //     }
+    //     for i in 0..8{
+    //         if  f32::is_nan((&pts[i].x).clone() as f32) { continue;}
+    //         f.write_fmt(format_args!("f {} {} {}\n",i+1+24*n,i+9+24*n,i+17+24*n));
+    //     }
+
+    // }
+
     triangle_clusters
 
 }
@@ -920,94 +1083,74 @@ fn main(){
             o: uv::Vec3::new(0.0,-2.0,0.0),
             n: uv::Vec3::new(0.0,1.0,0.0)
         },
-        mat: Box::new(Diffuse{
+        mat: Rc::new(Diffuse{
             col: uv::Vec3::new(1.0,1.0,1.0),
-            roughness: 1.0
-        })
-    };
-
-    let test_sphere = SphereRenderObject{
-        sphere: Sphere { o: uv::Vec3::new(0.0, 0.0, -3.0), r_sq: 1.0 },
-        mat: Box::new(Glossy{
-            col: uv::Vec3::new(0.7,0.7,0.7),
-            roughness: 1.0
-        })
-    };
-
-    let test_sphere_2 = SphereRenderObject{
-        sphere: Sphere { o: uv::Vec3::new(1.6, 1.6, -3.0), r_sq: 1.0 },
-        mat: Box::new(Diffuse{
-            col: uv::Vec3::new(0.5,0.5,1.0),
-            roughness: 1.0
-        })
-    };
-    
-    let test_tri = TriRenderObject{
-        tri: Tri { 
-            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
-            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
-            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
-            n:  uv::Vec3::new(0.0,0.0,1.0)
-        },
-        mat: Box::new(Diffuse{
-            col: uv::Vec3::new(0.5,1.0,0.5),
-            roughness: 1.0
-        })
-    };
-    let test_tri_cluster = TriClusterRenderObject{
-        tris: create_test_tri_cluster(),
-        mat: Box::new(Diffuse{
-            col: uv::Vec3::new(0.5,1.0,0.5),
             roughness: 1.0
         })
     };
 
     let model_tris = model_loader();
 
-    let mut test_model: Vec<Box<dyn Bounded>> = Vec::with_capacity(model_tris.len());
+    let mut test_model: Vec<Box<dyn Hittable>> = Vec::with_capacity(model_tris.len());
+    
+    let tea_pot_mat: Rc<dyn Material> = Rc::new(Diffuse{
+        col: uv::Vec3::new(0.7,0.7,0.7),
+        roughness: 1.0
+        });
+
+
     for tri_cluster in model_tris.into_iter() {
         test_model.push(Box::new(
             TriClusterRenderObject { 
             tris: tri_cluster, 
-            mat: Box::new(Emmisive{
-                col: uv::Vec3::new(fastrand::f32(),fastrand::f32(),fastrand::f32()),
-                }) 
-            }
+            //mat: Rc::new(Emmisive{
+            //    col: uv::Vec3::new(fastrand::f32(),fastrand::f32(),fastrand::f32()),
+            //}) 
+            mat: Rc::clone(&tea_pot_mat)
+           }
         ));
     }
     //test_model.push(Box::new(test_floor));
 
-    // let renderObjectList = RenderObjectList{
-    //         objects: test_model
-    //     // objects: vec![
-    //     //     //Box::new(test_floor),
-    //     //     //Box::new(test_sphere),
-    //     //     //Box::new(test_sphere_2),
-    //     //     Box::new(test_model)]
-    // };
+    println!("Testing on {} trigroups", test_model.len());
 
     let mut render_object_bvh = RenderObjectBVH{
         objects: test_model,
-        nodes: vec![]
+        nodes: vec![],
+        mat: Rc::new(Emmisive{
+            col: uv::Vec3::new(fastrand::f32(),fastrand::f32(),fastrand::f32()),
+            }) 
     };
 
     render_object_bvh.update_bvh();
 
-    let imgx = 512;
-    let imgy = 512;
-    let samples = 32;
+    let test_ray: Ray = Ray{
+        o: uv::Vec3::new(0.0, 1.0, 5.0),
+        d: uv::Vec3::new(0.02345234538475,-0.0012341827389741987237894, -1.0).normalized()
+    };
+    render_object_bvh.ray_test(&test_ray);
+
+    let renderObjectList = RenderObjectList{
+            objects: vec![
+                Box::new(render_object_bvh), 
+                    Box::new(test_floor)
+                ]
+        };
+    let imgx = 64;
+    let imgy = 64;
+    let samples = 4;
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
     for y in 0..imgy {
         for x in 0..imgx {
             let ray: Ray = Ray{
-                o: uv::Vec3::new(0.0, 0.0, 0.0),
+                o: uv::Vec3::new(-0.608, 6.959, 1.24),
                 d: uv::Vec3::new(2.0*(x as f32)/(imgx as f32)-1.0, 1.0-2.0*(y as f32)/(imgy as f32), -1.0).normalized()
             };
             let mut col: uv::Vec3 = uv::Vec3::new(0.0,0.0,0.0);
             for  _ in 0..samples {
-                col += trace_ray(&ray, &render_object_bvh, 4)/(samples as f32);
+                col += trace_ray(&ray, &renderObjectList, 4)/(samples as f32);
             }
 
 
