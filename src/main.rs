@@ -474,10 +474,11 @@ impl Hittable for RenderObjectBVH{
             }
         }
         // let final_duration = final_start.elapsed().as_nanos();
+        // let method_duration = bvh_start.elapsed().as_nanos();
         // let total_duration = final_duration + bvh_duration;
         // if hit.is_some(){
         //     println!("BVH traversed in: {}ns, {} possible hits found", bvh_duration, hits_found);
-        //     println!("Final tests took {}ns, total time {}ns\n", final_duration, total_duration);
+        //     println!("Final tests took {}ns, total time {}ns, method time {}ns\n", final_duration, total_duration,method_duration);
         // }
         hit
     }
@@ -846,89 +847,6 @@ fn tri_vec_intersect_8(
 
 // }
 
-fn create_test_tri_cluster() -> Trix8 {
-    let test_tris: Vec<Tri> = vec![
-        Tri{
-            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
-            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
-            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
-            n:  uv::Vec3::new(0.0,0.0,1.0)
-        },
-        Tri{
-            p0: uv::Vec3::new(1.0, 0.0, -2.0), 
-            p1: uv::Vec3::new(1.0, 1.0, -2.0), 
-            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
-            n:  uv::Vec3::new(0.0,0.0,1.0)
-        },
-        Tri{
-            p0: uv::Vec3::new(1.0, 0.0, -2.0), 
-            p1: uv::Vec3::new(2.0, 0.0, -2.0), 
-            p2: uv::Vec3::new(1.0, 1.0, -2.0), 
-            n:  uv::Vec3::new(0.0,0.0,1.0)
-        },
-        Tri{
-            p0: uv::Vec3::new(0.0, 1.0, -2.0), 
-            p1: uv::Vec3::new(1.0, 1.0, -2.0), 
-            p2: uv::Vec3::new(0.0, 2.0, -2.0), 
-            n:  uv::Vec3::new(0.0,0.0,1.0)
-        },        
-        Tri{
-            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
-            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
-            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
-            n:  uv::Vec3::new(0.0,0.0,1.0)
-        },
-        Tri{
-            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
-            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
-            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
-            n:  uv::Vec3::new(0.0,0.0,1.0)
-        },
-        Tri{
-            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
-            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
-            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
-            n:  uv::Vec3::new(0.0,0.0,1.0)
-        },
-        Tri{
-            p0: uv::Vec3::new(0.0, 0.0, -2.0), 
-            p1: uv::Vec3::new(1.0, 0.0, -2.0), 
-            p2: uv::Vec3::new(0.0, 1.0, -2.0), 
-            n:  uv::Vec3::new(0.0,0.0,1.0)
-        }
-        ];
-
-
-        let mut p0: [uv::Vec3; 8] = Default::default();
-        let mut p1: [uv::Vec3; 8] = Default::default();
-        let mut p2: [uv::Vec3; 8] = Default::default();
-        let mut n:  [uv::Vec3; 8] = Default::default();
-        for (i, tri) in test_tris.iter().enumerate(){
-            p0[i] = tri.p0;
-            p1[i] = tri.p1;
-            p2[i] = tri.p2;
-            n[i]  = tri.n;
-        }
-
-        Trix8{
-            p0: uv::Vec3x8::from(p0),
-            p1: uv::Vec3x8::from(p1),
-            p2: uv::Vec3x8::from(p2),
-            n
-        }
-}
-
-// #[bench]
-// fn bench_simd_tris(b: &mut Bencher){
-//     let test_ray: Ray = Ray { 
-//         o: uv::Vec3::new( 0.0, 0.0, 0.0),
-//         d: uv::Vec3::new( 0.0, 0.0,-1.0)
-//     };
-//         b.iter(||{
-//             Some((&create_test_tri_cluster(), &test_ray)).into_iter().map(tri_vec_intersect_8).collect::<Vec<uv::f32x8>>()
-//         });
-// }
-
 
 fn model_loader() -> Vec<Trix8>
 {
@@ -1112,7 +1030,6 @@ fn main(){
     }
     //test_model.push(Box::new(test_floor));
 
-    println!("Testing on {} trigroups", test_model.len());
 
     let mut render_object_bvh = RenderObjectBVH{
         objects: test_model,
@@ -1124,11 +1041,6 @@ fn main(){
 
     render_object_bvh.update_bvh();
 
-    let test_ray: Ray = Ray{
-        o: uv::Vec3::new(0.0, 1.0, 5.0),
-        d: uv::Vec3::new(0.02345234538475,-0.0012341827389741987237894, -1.0).normalized()
-    };
-    render_object_bvh.ray_test(&test_ray);
 
     let renderObjectList = RenderObjectList{
             objects: vec![
