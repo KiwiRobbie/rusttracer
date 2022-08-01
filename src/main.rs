@@ -19,13 +19,6 @@ use std::io::BufWriter;
 use std::path::Path;
 use std::collections::hash_set::HashSet;
 
-// Window
-use softbuffer::GraphicsContext;
-use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::WindowBuilder;
-
-
 const EPSILON:  f32 = 0.00001;
 
 
@@ -687,7 +680,7 @@ fn sample_sky(ray: &Ray) -> uv::Vec3{
     let sky_sample = horizon.lerp(apex, ray.d.y.clamp(0.0,1.0)).lerp(ground, (-5.0 * ray.d.y).clamp(0.0, 1.0).powf(0.5));
     let sun_sample = if ray.d.dot(sun_dir) < 0.9 { uv::Vec3::new(0.0,0.0,0.0)}else{sun} ;
 
-    0.0*(sky_sample + 2.0 * sun_sample)
+    2.0*(sky_sample + 2.0 * sun_sample)
 }
 
 fn trace_ray(ray: &Ray, scene:&dyn Hittable, depth: i32) -> uv::Vec3{ 
@@ -808,11 +801,11 @@ fn tri_vec_intersect_8(
     tri_intersect_8(input.0, input.1)
 }
 
-fn model_loader() -> Vec<Trix8>
+fn model_loader(model_string: &str) -> Vec<Trix8>
 {
     println!("Loading Model");
     // Create a path to the file // sponza_simple
-    let path = Path::new("models/teapot.obj");
+    let path = Path::new(model_string);
     let display = path.display();
 
     // Open the path in read-only mode, returns `io::Result<File>`
@@ -967,43 +960,61 @@ fn main(){
         })
     };
 
-    let model_tris = model_loader();
+    //let teapot_tris = model_loader("models/teapot.obj");
+    let sponza_tris = model_loader("models/sponza_simple.obj");
 
-    let mut test_model: Vec<Box<dyn Hittable>> = Vec::with_capacity(model_tris.len());
+    let mut scene_model: Vec<Box<dyn Hittable>> = Vec::with_capacity(sponza_tris.len());
     
-    let tea_pot_mat: Rc<dyn Material> = Rc::new(Diffuse{
+    let sponza_mat: Rc<dyn Material> = Rc::new(Diffuse{
         col: uv::Vec3::new(0.7,0.7,0.7),
         roughness: 1.0
         });
 
 
-    for tri_cluster in model_tris.into_iter() {
+    // for tri_cluster in sponza_tris.into_iter() {
+    //     let tau:[f32; 8] = uv::f32x8::TAU.into();
+    //     let tau = tau[0];
+    //     let hue = fastrand::f32()*tau;
+    //     let col =  1.25*uv::Vec3::new(
+    //        0.5+0.5*f32::sin(hue),
+    //        0.5+0.5*f32::sin(hue+tau/3.0),
+    //        0.5+0.5*f32::sin(hue+2.0*tau/3.0)
+    //     );
+    //     scene_model.push(Box::new(
+    //         TriClusterRenderObject { 
+    //         tris: Trix8 { 
+    //             p0: tri_cluster.p0/uv::f32x8::splat(2.0), 
+    //             p1: tri_cluster.p1/uv::f32x8::splat(2.0), 
+    //             p2: tri_cluster.p2/uv::f32x8::splat(2.0), 
+    //             n: tri_cluster.n 
+    //         }, 
+    //         mat: Rc::new(Emmisive{
+    //             col: 2.0*col,
+    //         }) 
+    //         //mat: Rc::clone(&tea_pot_mat)
+    //        }
+    //     ));
+    // }
+
+    for tri_cluster in sponza_tris.into_iter() {
         let tau:[f32; 8] = uv::f32x8::TAU.into();
         let tau = tau[0];
-    
         let hue = fastrand::f32()*tau;
-
-
         let col =  1.25*uv::Vec3::new(
            0.5+0.5*f32::sin(hue),
            0.5+0.5*f32::sin(hue+tau/3.0),
            0.5+0.5*f32::sin(hue+2.0*tau/3.0)
         );
-        test_model.push(Box::new(
+        scene_model.push(Box::new(
             TriClusterRenderObject { 
             tris: tri_cluster, 
-            mat: Rc::new(Emmisive{
-                col: col,
-            }) 
-            //mat: Rc::clone(&tea_pot_mat)
+            mat: Rc::clone(&sponza_mat)
            }
         ));
     }
-    //test_model.push(Box::new(test_floor));
-
 
     let mut render_object_bvh = RenderObjectBVH{
-        objects: test_model,
+        objects: scene_model,
         nodes: vec![],
         mat: Rc::new(Emmisive{
             col: uv::Vec3::new(fastrand::f32(),fastrand::f32(),fastrand::f32()),
@@ -1019,9 +1030,9 @@ fn main(){
                     Box::new(test_floor)
                 ]
         };
-    let imgx = 256;
-    let imgy = 256;
-    let samples = 64;
+    let imgx = 1024;
+    let imgy = 1024;
+    let samples = 128;
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
@@ -1030,8 +1041,12 @@ fn main(){
     for y in 0..imgy {
         for x in 0..imgx {
             let ray: Ray = Ray{
-                o: uv::Vec3::new(0.0, 2.0, 5.0),
-                d: uv::Vec3::new(2.0*(x as f32)/(imgx as f32)-1.0, 1.0-2.0*(y as f32)/(imgy as f32), -1.0).normalized()
+                o: uv::Vec3::new(5.0, 2.0, 0.0),
+                d: uv::Vec3::new(
+                    -1.0,
+                    1.0-2.0*(y as f32)/(imgy as f32), 
+                    2.0*(x as f32)/(imgx as f32)-1.0, 
+                ).normalized()
             };
             let mut col: uv::Vec3 = uv::Vec3::new(0.0,0.0,0.0);
             for  _ in 0..samples {
