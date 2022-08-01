@@ -494,21 +494,36 @@ impl Hittable for RenderObjectBVH{
         let ray_c = RayCx8::splat(ray);
 
         let mut bvh_tests: Vec<u32> = vec![0];
-        let mut final_tests: Vec<u32> = vec![];
-        
+        let mut hit: Option<Hit> = None;
+
+        let mut nearest: f32 = f32::MAX;
+
         while bvh_tests.len() > 0{
             let node = &self.nodes[bvh_tests.pop().unwrap().clone() as usize];
             let hit_data: [f32; 8] = aabb_hit_8(&ray_c, node.subnode_bounds.unwrap().0, node.subnode_bounds.unwrap().1).into();
             
             for (i, subnode) in node.subnodes.as_ref().unwrap().iter().enumerate() {
-                if hit_data[i].is_nan(){
-                    let subnode_object = &self.nodes[subnode.clone() as usize];
-                    if subnode_object.subnodes.is_some(){
-                        bvh_tests.push(subnode.clone());
-                    } else if subnode_object.leaf.is_some() {
-                        final_tests.push(subnode_object.leaf.unwrap());
+                if hit_data[i].is_nan(){continue;}
+                if hit_data[i]>nearest {continue;}
+                
+                let subnode_object = &self.nodes[subnode.clone() as usize];
+                if subnode_object.subnodes.is_some(){
+                    bvh_tests.push(subnode.clone());
+                } else if subnode_object.leaf.is_some() {
+                    let temp_hit = self.objects[subnode_object.leaf.unwrap() as usize].ray_test(ray);
+                    if temp_hit.is_some() {
+                        if hit.is_some(){
+                            if hit.as_ref().unwrap().t>temp_hit.as_ref().unwrap().t {
+                                hit = temp_hit;
+                                nearest = hit.as_ref().unwrap().t;
+                            }
+                        }else{
+                            hit = temp_hit;
+                            nearest = hit.as_ref().unwrap().t;
+                        }
                     }
                 }
+                
             }
             //println!("Took {}ns", start_hit.elapsed().as_nanos());
 
@@ -518,20 +533,6 @@ impl Hittable for RenderObjectBVH{
         // let hits_found = final_tests.len();
         // let final_start = Instant::now();
         
-        let mut hit: Option<Hit> = None;
-        while final_tests.len() > 0{
-            let n = final_tests.pop().unwrap();
-            let temp_hit = self.objects[n as usize].as_ref().ray_test(ray);
-            if temp_hit.is_some() {
-                if hit.is_some(){
-                    if hit.as_ref().unwrap().t>temp_hit.as_ref().unwrap().t {
-                        hit = temp_hit;
-                    }
-                }else{
-                    hit = temp_hit;
-                }
-            }
-        }
         // let final_duration = final_start.elapsed().as_nanos();
         // let method_duration = bvh_start.elapsed().as_nanos();
         // let total_duration = final_duration + bvh_duration;
@@ -635,7 +636,7 @@ fn aabb_hit_8(r: &RayCx8, min: uv::Vec3x8, max: uv::Vec3x8) -> uv::f32x8 {
     let tmin = uv::f32x8::max(uv::f32x8::max(uv::f32x8::min(t1, t2), uv::f32x8::min(t3, t4)), uv::f32x8::min(t5, t6));
     let tmax = uv::f32x8::min(uv::f32x8::min(uv::f32x8::max(t1, t2), uv::f32x8::max(t3, t4)), uv::f32x8::max(t5, t6));
 
-    tmax.cmp_ge(uv::f32x8::ZERO) & tmax.cmp_ge(tmin)
+    tmax.cmp_lt(uv::f32x8::ZERO) | tmax.cmp_lt(tmin) | tmin
 }
 
 // BVH AABB 
@@ -1030,9 +1031,9 @@ fn main(){
                     Box::new(test_floor)
                 ]
         };
-    let imgx = 1024;
-    let imgy = 1024;
-    let samples = 128;
+    let imgx = 128;
+    let imgy = 128;
+    let samples = 8;
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
