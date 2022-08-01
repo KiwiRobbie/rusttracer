@@ -19,6 +19,12 @@ use std::io::BufWriter;
 use std::path::Path;
 use std::collections::hash_set::HashSet;
 
+// Window
+use softbuffer::GraphicsContext;
+use winit::event::{Event, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::window::WindowBuilder;
+
 
 const EPSILON:  f32 = 0.00001;
 
@@ -28,6 +34,50 @@ struct Ray{
     o: uv::Vec3,
     d: uv::Vec3,
 }
+
+struct Rayx8{
+    o: uv::Vec3x8,
+    d: uv::Vec3x8
+}
+
+impl Rayx8{
+    fn splat(ray: &Ray) -> Rayx8{
+        Rayx8 { 
+            o: uv::Vec3x8::splat(ray.o),
+            d: uv::Vec3x8::splat(ray.d)
+        }
+    }
+}
+
+struct RayCx8{
+    o: uv::Vec3x8,
+    d: uv::Vec3x8,
+    i: uv::Vec3x8
+}
+
+impl RayCx8{
+    fn splat(ray: &Ray) -> RayCx8{
+        RayCx8 { 
+            o: uv::Vec3x8::splat(ray.o),
+            d: uv::Vec3x8::splat(ray.d),
+            i: uv::Vec3x8::splat(uv::Vec3::new(1.0/ray.d.x,1.0/ray.d.y,1.0/ray.d.z))
+        }
+    }
+}
+
+struct Tri{
+    p0: uv::Vec3,
+    p1: uv::Vec3,
+    p2: uv::Vec3,
+    n: uv::Vec3
+}
+struct Trix8{
+    p0: uv::Vec3x8,
+    p1: uv::Vec3x8,
+    p2: uv::Vec3x8, 
+    n:  [uv::Vec3;8]
+}
+
 
 struct Sphere{
     o: uv::Vec3,
@@ -40,6 +90,7 @@ struct Plane{
 }
 
 type Aabb = (uv::Vec3, uv::Vec3);
+type Aabbx8 = (uv::Vec3x8, uv::Vec3x8);
 
 // Render Objects 
 trait Hittable{
@@ -265,6 +316,7 @@ impl Hittable for RenderObjectList{
 struct BvhNode{
     bound: Option<Aabb>,
     subnodes: Option<Vec<u32>>,
+    subnode_bounds: Option<Aabbx8>,
     leaf: Option<u32>
 }
 
@@ -278,16 +330,25 @@ impl RenderObjectBVH{
     fn bounding_volume(mut self: &mut Self, idx: u32) -> &mut Self{
         let mut min = uv::Vec3::new(f32::MAX, f32::MAX, f32::MAX);
         let mut max = uv::Vec3::new(f32::MIN, f32::MIN, f32::MIN);
-        for subnode in self.nodes[idx as usize].subnodes.clone().unwrap() {
+
+        let mut s_min: [uv::Vec3; 8] = [uv::Vec3::new(f32::MAX,f32::MAX,f32::MAX); 8];
+        let mut s_max: [uv::Vec3; 8] = [uv::Vec3::new(f32::MIN,f32::MIN,f32::MIN); 8];
+
+        for (i, subnode) in self.nodes[idx as usize].subnodes.clone().unwrap().iter().enumerate() {
             if self.nodes[subnode.clone() as usize].bound.is_none() {
                 self = RenderObjectBVH::bounding_volume(self,subnode.clone());
             }
+            let subnode_bounds = self.nodes[subnode.clone() as usize].bound.unwrap();
 
-            min = min.min_by_component(self.nodes[subnode.clone() as usize].bound.unwrap().0);
-            max = max.max_by_component(self.nodes[subnode.clone() as usize].bound.unwrap().1);
+            min = min.min_by_component(subnode_bounds.0);
+            max = max.max_by_component(subnode_bounds.1);
+            s_min[i] = subnode_bounds.0;
+            s_max[i] = subnode_bounds.1;
+
         }
         let target_node = &mut self.nodes[idx as usize];
         target_node.bound = Some((min,max));
+        target_node.subnode_bounds = Some((s_min.into(), s_max.into()));
         self
     }
 
@@ -330,6 +391,7 @@ impl RenderObjectBVH{
                     BvhNode{
                         bound: None,
                         subnodes: Some(node),
+                        subnode_bounds: None,
                         leaf: None
                     }
                 );
@@ -342,6 +404,7 @@ impl RenderObjectBVH{
         self.nodes = vec![BvhNode{
             bound: None,
             subnodes: None,
+            subnode_bounds: None,
             leaf: None
         }];
 
@@ -351,8 +414,9 @@ impl RenderObjectBVH{
             self.nodes.push(
                 BvhNode { 
                     bound: Some(object.bounding_volume()),
+                    subnodes: None,
+                    subnode_bounds: None,
                     leaf: Some(i as u32),
-                    subnodes: None
                 }
             )
         }
@@ -434,25 +498,27 @@ impl RenderObjectBVH{
 impl Hittable for RenderObjectBVH{
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
         // let bvh_start = Instant::now();
-        
+        let ray_c = RayCx8::splat(ray);
+
         let mut bvh_tests: Vec<u32> = vec![0];
         let mut final_tests: Vec<u32> = vec![];
         
         while bvh_tests.len() > 0{
-            let node = bvh_tests.pop().unwrap();
-            if aabb_hit(
-                ray,
-                self.nodes[node.clone() as usize].bound.unwrap().0,
-                self.nodes[node.clone() as usize].bound.unwrap().1
-            ){
-                let hit_node = &self.nodes[node.clone() as usize]; 
-                if hit_node.subnodes.is_some() {
-                    bvh_tests.append(&mut hit_node.subnodes.as_ref().unwrap().clone())
-                }
-                if hit_node.leaf.is_some(){
-                    final_tests.push(hit_node.leaf.unwrap())
+            let node = &self.nodes[bvh_tests.pop().unwrap().clone() as usize];
+            let hit_data: [f32; 8] = aabb_hit_8(&ray_c, node.subnode_bounds.unwrap().0, node.subnode_bounds.unwrap().1).into();
+            
+            for (i, subnode) in node.subnodes.as_ref().unwrap().iter().enumerate() {
+                if hit_data[i].is_nan(){
+                    let subnode_object = &self.nodes[subnode.clone() as usize];
+                    if subnode_object.subnodes.is_some(){
+                        bvh_tests.push(subnode.clone());
+                    } else if subnode_object.leaf.is_some() {
+                        final_tests.push(subnode_object.leaf.unwrap());
+                    }
                 }
             }
+            //println!("Took {}ns", start_hit.elapsed().as_nanos());
+
         }
         
         // let bvh_duration = bvh_start.elapsed().as_nanos();
@@ -466,7 +532,7 @@ impl Hittable for RenderObjectBVH{
             if temp_hit.is_some() {
                 if hit.is_some(){
                     if hit.as_ref().unwrap().t>temp_hit.as_ref().unwrap().t {
-                        hit=temp_hit;
+                        hit = temp_hit;
                     }
                 }else{
                     hit = temp_hit;
@@ -476,7 +542,7 @@ impl Hittable for RenderObjectBVH{
         // let final_duration = final_start.elapsed().as_nanos();
         // let method_duration = bvh_start.elapsed().as_nanos();
         // let total_duration = final_duration + bvh_duration;
-        // if hit.is_some(){
+        // if hit.is_some() || true{
         //     println!("BVH traversed in: {}ns, {} possible hits found", bvh_duration, hits_found);
         //     println!("Final tests took {}ns, total time {}ns, method time {}ns\n", final_duration, total_duration,method_duration);
         // }
@@ -564,12 +630,23 @@ impl Material for Emmisive{
     
 }
 
+// BVH AABBx8
+fn aabb_hit_8(r: &RayCx8, min: uv::Vec3x8, max: uv::Vec3x8) -> uv::f32x8 {
+    let t1 = (min.x - r.o.x)*r.i.x;
+    let t2 = (max.x - r.o.x)*r.i.x;
+    let t3 = (min.y - r.o.y)*r.i.y;
+    let t4 = (max.y - r.o.y)*r.i.y;
+    let t5 = (min.z - r.o.z)*r.i.z;
+    let t6 = (max.z - r.o.z)*r.i.z;
+
+    let tmin = uv::f32x8::max(uv::f32x8::max(uv::f32x8::min(t1, t2), uv::f32x8::min(t3, t4)), uv::f32x8::min(t5, t6));
+    let tmax = uv::f32x8::min(uv::f32x8::min(uv::f32x8::max(t1, t2), uv::f32x8::max(t3, t4)), uv::f32x8::max(t5, t6));
+
+    tmax.cmp_ge(uv::f32x8::ZERO) & tmax.cmp_ge(tmin)
+}
+
 // BVH AABB 
 fn aabb_hit(r: &Ray, min: uv::Vec3, max: uv::Vec3) -> bool {
-
-
-
-        // r.dir is unit direction vector of ray
     let dirfrac_x = 1.0 / r.d.x;
     let dirfrac_y = 1.0 / r.d.y;
     let dirfrac_z = 1.0 / r.d.z;
@@ -588,43 +665,14 @@ fn aabb_hit(r: &Ray, min: uv::Vec3, max: uv::Vec3) -> bool {
     // if tmax < 0, ray (line) is intersecting AABB, but the whole AABB is behind us
     if (tmax < 0.0)
     {
-        //t = tmax;
         return false;
     }
-
-    // if tmin > tmax, ray doesn't intersect AABB
     if (tmin > tmax)
     {
-        //t = tmax;
         return false;
     }
-
-    //t = tmin;
     return true;
-
-
-    // for a in 0..3 {
-    //     let t_min = EPSILON;
-    //     let t_max = f32::MAX; 
-
-    //     let invD = 1.0 / r.d[a];
-    //     let mut t0 = (min[a] - r.o[a]) * invD;
-    //     let mut t1 = (max[a] - r.o[a]) * invD;
-        
-    //     if invD < 0.0
-    //     {
-    //         (t0, t1) = (t1,t0);
-    //     }
-
-    //     let t_min = if t0 > t_min {t0} else {t_min};
-    //     let t_max = if t1 < t_max {t1} else {t_max};
-    //     if t_max <= t_min {
-    //         return false;
-    //     }
-    // }
-    // true
 }
-
 
 
 fn sample_sky(ray: &Ray) -> uv::Vec3{
@@ -639,7 +687,7 @@ fn sample_sky(ray: &Ray) -> uv::Vec3{
     let sky_sample = horizon.lerp(apex, ray.d.y.clamp(0.0,1.0)).lerp(ground, (-5.0 * ray.d.y).clamp(0.0, 1.0).powf(0.5));
     let sun_sample = if ray.d.dot(sun_dir) < 0.9 { uv::Vec3::new(0.0,0.0,0.0)}else{sun} ;
 
-    sky_sample + 2.0 * sun_sample
+    0.0*(sky_sample + 2.0 * sun_sample)
 }
 
 fn trace_ray(ray: &Ray, scene:&dyn Hittable, depth: i32) -> uv::Vec3{ 
@@ -667,37 +715,6 @@ fn trace_ray(ray: &Ray, scene:&dyn Hittable, depth: i32) -> uv::Vec3{
 }
 
 
-
-struct Tri{
-    p0: uv::Vec3,
-    p1: uv::Vec3,
-    p2: uv::Vec3,
-    n: uv::Vec3
-}
-struct Trix8{
-    p0: uv::Vec3x8,
-    p1: uv::Vec3x8,
-    p2: uv::Vec3x8, 
-    n:  [uv::Vec3;8]
-}
-
-struct Rayx8{
-    o: uv::Vec3x8,
-    d: uv::Vec3x8
-}
-
-trait Splat{
-    fn splat(ray: &Ray) -> Rayx8;
-}
-
-impl Splat for Rayx8{
-    fn splat(ray: &Ray) -> Rayx8{
-        Rayx8 { 
-            o: uv::Vec3x8::splat(ray.o),
-            d: uv::Vec3x8::splat(ray.d)
-        }
-    }
-}
 
 fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
     let (edge1, edge2, h, s, q): (uv::Vec3, uv::Vec3, uv::Vec3, uv::Vec3, uv::Vec3);
@@ -791,68 +808,11 @@ fn tri_vec_intersect_8(
     tri_intersect_8(input.0, input.1)
 }
 
-//#[bench]
-// fn bench_non_simd_tris(b: &mut Bencher){
-//     let test_ray: Ray = Ray { 
-//         o: uv::Vec3::new( 0.0, 0.0, 0.0),
-//         d: uv::Vec3::new( 0.0, 0.0,-1.0)
-//     };
-
-//     let test_tris: Vec<Tri> = vec![
-//         Tri{
-//             p0: uv::Vec3::new(0.0, 0.0, -1.0),
-//             p1: uv::Vec3::new(1.0, 0.0, -1.0),
-//             p2: uv::Vec3::new(0.0, 1.0, -1.0)
-//         },
-//         Tri{
-//             p0: uv::Vec3::new(1.0, 0.0, -1.0),
-//             p1: uv::Vec3::new(1.0, 1.0, -1.0),
-//             p2: uv::Vec3::new(0.0, 1.0, -1.0)
-//         },
-//         Tri{
-//             p0: uv::Vec3::new(1.0, 0.0, -1.0),
-//             p1: uv::Vec3::new(2.0, 0.0, -1.0),
-//             p2: uv::Vec3::new(1.0, 1.0, -1.0)
-//         },
-//         Tri{
-//             p0: uv::Vec3::new(2.0, 0.0, -1.0),
-//             p1: uv::Vec3::new(2.0, 1.0, -1.0),
-//             p2: uv::Vec3::new(1.0, 1.0, -1.0)
-//         },        
-//         Tri{
-//             p0: uv::Vec3::new(0.0, 0.0, -2.0),
-//             p1: uv::Vec3::new(1.0, 0.0, -2.0),
-//             p2: uv::Vec3::new(0.0, 1.0, -2.0)
-//         },
-//         Tri{
-//             p0: uv::Vec3::new(1.0, 0.0, -2.0),
-//             p1: uv::Vec3::new(1.0, 1.0, -2.0),
-//             p2: uv::Vec3::new(0.0, 1.0, -2.0)
-//         },
-//         Tri{
-//             p0: uv::Vec3::new(1.0, 0.0, -2.0),
-//             p1: uv::Vec3::new(2.0, 0.0, -2.0),
-//             p2: uv::Vec3::new(1.0, 1.0, -2.0)
-//         },
-//         Tri{
-//             p0: uv::Vec3::new(2.0, 0.0, -2.0),
-//             p1: uv::Vec3::new(2.0, 1.0, -2.0),
-//             p2: uv::Vec3::new(1.0, 1.0, -2.0)
-//         }
-//         ];
-
-//         b.iter(||{
-//             Some((&test_tris, &test_ray)).into_iter().map(tri_vec_intersect).collect::<Vec<Vec<f32>>>()
-//         });
-
-// }
-
-
 fn model_loader() -> Vec<Trix8>
 {
     println!("Loading Model");
     // Create a path to the file // sponza_simple
-    let path = Path::new("models/sponza_simple.obj");
+    let path = Path::new("models/teapot.obj");
     let display = path.display();
 
     // Open the path in read-only mode, returns `io::Result<File>`
@@ -998,7 +958,7 @@ fn main(){
     // Scene creation
     let test_floor = PlaneRenderObject{
         plane: Plane{
-            o: uv::Vec3::new(0.0,-2.0,0.0),
+            o: uv::Vec3::new(0.0,0.0,0.0),
             n: uv::Vec3::new(0.0,1.0,0.0)
         },
         mat: Rc::new(Diffuse{
@@ -1018,13 +978,24 @@ fn main(){
 
 
     for tri_cluster in model_tris.into_iter() {
+        let tau:[f32; 8] = uv::f32x8::TAU.into();
+        let tau = tau[0];
+    
+        let hue = fastrand::f32()*tau;
+
+
+        let col =  1.25*uv::Vec3::new(
+           0.5+0.5*f32::sin(hue),
+           0.5+0.5*f32::sin(hue+tau/3.0),
+           0.5+0.5*f32::sin(hue+2.0*tau/3.0)
+        );
         test_model.push(Box::new(
             TriClusterRenderObject { 
             tris: tri_cluster, 
-            //mat: Rc::new(Emmisive{
-            //    col: uv::Vec3::new(fastrand::f32(),fastrand::f32(),fastrand::f32()),
-            //}) 
-            mat: Rc::clone(&tea_pot_mat)
+            mat: Rc::new(Emmisive{
+                col: col,
+            }) 
+            //mat: Rc::clone(&tea_pot_mat)
            }
         ));
     }
@@ -1048,16 +1019,18 @@ fn main(){
                     Box::new(test_floor)
                 ]
         };
-    let imgx = 64;
-    let imgy = 64;
-    let samples = 4;
+    let imgx = 256;
+    let imgy = 256;
+    let samples = 64;
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
+
+    let start_time = Instant::now();
     for y in 0..imgy {
         for x in 0..imgx {
             let ray: Ray = Ray{
-                o: uv::Vec3::new(-0.608, 6.959, 1.24),
+                o: uv::Vec3::new(0.0, 2.0, 5.0),
                 d: uv::Vec3::new(2.0*(x as f32)/(imgx as f32)-1.0, 1.0-2.0*(y as f32)/(imgy as f32), -1.0).normalized()
             };
             let mut col: uv::Vec3 = uv::Vec3::new(0.0,0.0,0.0);
@@ -1071,7 +1044,8 @@ fn main(){
         }
         println!("{}",  y);
     }
-
+    let duration = start_time.elapsed().as_millis();
+    println!("Rendered in {}ms", duration);
     // Save the image as “fractal.png”, the format is deduced from the path
     imgbuf.save("render.png").unwrap();
 }
