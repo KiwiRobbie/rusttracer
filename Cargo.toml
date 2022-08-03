@@ -12,3 +12,4 @@ image = "0.24.3"
 
 [profile.release]
 debug = false
+

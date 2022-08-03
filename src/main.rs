@@ -8,6 +8,7 @@ extern crate test;
 use test::Bencher;
 use uv::Vec3;
 use uv::Vec3x8;
+use std::ops::Index;
 use std::time::{Duration, Instant};
 use std::rc::Rc;
 
@@ -308,53 +309,82 @@ impl Hittable for RenderObjectList{
 
 struct BvhNode{
     bound: Option<Aabb>,
-    subnodes: Option<Vec<u32>>,
+    subnodes: Option<Vec<usize>>,
     subnode_bounds: Option<Aabbx8>,
-    leaf: Option<u32>
+    leaf: Option<usize>
+}
+
+struct PackedBvh{
+    subnode_min_bound: uv::Vec3x8,
+    subnode_max_bound: uv::Vec3x8,
+    subnodes: [usize; 8],
+    leaf: usize
 }
 
 struct RenderObjectBVH{
     objects: Vec<Box<dyn Hittable>>,
     nodes: Vec<BvhNode>,
-    mat: Rc<dyn Material>
+    mat: Rc<dyn Material>,
+    packed_nodes: Vec<PackedBvh>
 }
 
 impl RenderObjectBVH{
-    fn bounding_volume(mut self: &mut Self, idx: u32) -> &mut Self{
+    fn pack_bvh(&mut self){
+        self.packed_nodes = vec![]; 
+
+        for node in self.nodes.iter(){
+            let mut subnodes: [usize; 8] = [0;8];
+            if node.subnodes.is_some() {
+                for (i,v) in node.subnodes.as_ref().unwrap().iter().enumerate(){
+                    subnodes[i] = v.clone();
+                }
+            }
+            self.packed_nodes.push(PackedBvh { 
+                subnode_min_bound: node.subnode_bounds.unwrap_or_default().0, 
+                subnode_max_bound: node.subnode_bounds.unwrap_or_default().1, 
+                subnodes: subnodes,
+                leaf: node.leaf.unwrap_or_else(||usize::MAX)
+            });
+
+        }   
+    }
+
+    fn bounding_volume(mut self: &mut Self, idx: usize) -> &mut Self{
         let mut min = uv::Vec3::new(f32::MAX, f32::MAX, f32::MAX);
         let mut max = uv::Vec3::new(f32::MIN, f32::MIN, f32::MIN);
 
-        let mut s_min: [uv::Vec3; 8] = [uv::Vec3::new(f32::MAX,f32::MAX,f32::MAX); 8];
-        let mut s_max: [uv::Vec3; 8] = [uv::Vec3::new(f32::MIN,f32::MIN,f32::MIN); 8];
+        let mut s_min: [uv::Vec3; 8] = [uv::Vec3::zero(); 8];
+        let mut s_max: [uv::Vec3; 8] = [uv::Vec3::zero(); 8];
 
-        for (i, subnode) in self.nodes[idx as usize].subnodes.clone().unwrap().iter().enumerate() {
-            if self.nodes[subnode.clone() as usize].bound.is_none() {
+        for (i, subnode) in self.nodes[idx ].subnodes.clone().unwrap().iter().enumerate() {
+            if self.nodes[subnode.clone() ].bound.is_none() {
                 self = RenderObjectBVH::bounding_volume(self,subnode.clone());
             }
-            let subnode_bounds = self.nodes[subnode.clone() as usize].bound.unwrap();
+            let subnode_bounds = self.nodes[subnode.clone() ].bound.unwrap();
 
-            min = min.min_by_component(subnode_bounds.0);
-            max = max.max_by_component(subnode_bounds.1);
+
+            min = min.min_by_component(subnode_bounds.0)-uv::Vec3::one()*EPSILON;
+            max = max.max_by_component(subnode_bounds.1)+uv::Vec3::one()*EPSILON;
+
             s_min[i] = subnode_bounds.0;
             s_max[i] = subnode_bounds.1;
-
         }
-        let target_node = &mut self.nodes[idx as usize];
+        let target_node = &mut self.nodes[idx];
         target_node.bound = Some((min,max));
         target_node.subnode_bounds = Some((s_min.into(), s_max.into()));
         self
     }
 
-    fn split_nodes(&self, mut nodes: Vec<u32>, axis: usize) -> (Vec<u32>, Vec<u32>){
+    fn split_nodes(&self, mut nodes: Vec<usize>, axis: usize) -> (Vec<usize>, Vec<usize>){
         if(nodes.len()<=8){
             return (nodes, vec![]);
         }
         
         nodes.sort_by(|a, b|{
-            (self.nodes[a.clone() as usize].bound.unwrap().0[axis]
-            +self.nodes[a.clone() as usize].bound.unwrap().1[axis]).
-            partial_cmp(&(self.nodes[b.clone() as usize].bound.unwrap().0[axis]+
-            self.nodes[b.clone() as usize].bound.unwrap().1[axis])).
+            (self.nodes[a.clone()].bound.unwrap().0[axis]
+            +self.nodes[a.clone()].bound.unwrap().1[axis]).
+            partial_cmp(&(self.nodes[b.clone()].bound.unwrap().0[axis]+
+            self.nodes[b.clone()].bound.unwrap().1[axis])).
             unwrap()
         });
 
@@ -362,8 +392,8 @@ impl RenderObjectBVH{
         (nodes,split)
     }
 
-    fn bin_children(&mut self, idx: u32){
-        let (a,e) = self.split_nodes(self.nodes[idx as usize].subnodes.as_ref().unwrap().clone(), 0);
+    fn bin_children(&mut self, idx: usize){
+        let (a,e) = self.split_nodes(self.nodes[idx].subnodes.as_ref().unwrap().clone(), 0);
         let (a,c) = self.split_nodes(a, 1);
         let (a,b) = self.split_nodes(a, 2);
         let (c,d) = self.split_nodes(c, 2);
@@ -372,13 +402,13 @@ impl RenderObjectBVH{
         let (e,f) = self.split_nodes(e, 2);
         let (g,h) = self.split_nodes(g, 2);
  
-        let mut subnodes: Vec<u32> = Vec::new();
+        let mut subnodes: Vec<usize> = Vec::new();
 
 
         for node in [a,b,c,d,e,f,g,h]{
             if node.len() > 0{
                 subnodes.push(
-                    self.nodes.len() as u32
+                    self.nodes.len()
                 );
                 self.nodes.push(
                     BvhNode{
@@ -390,7 +420,7 @@ impl RenderObjectBVH{
                 );
             }
         }
-        self.nodes[idx as usize].subnodes = Some(subnodes);
+        self.nodes[idx].subnodes = Some(subnodes);
     }
 
     fn update_bvh(&mut self){
@@ -401,15 +431,15 @@ impl RenderObjectBVH{
             leaf: None
         }];
 
-        let mut leaves: Vec<u32> = Vec::new();
+        let mut leaves: Vec<usize> = Vec::new();
         for (i, object) in self.objects.iter().enumerate(){
-            leaves.push(self.nodes.len() as u32);
+            leaves.push(self.nodes.len() );
             self.nodes.push(
                 BvhNode { 
                     bound: Some(object.bounding_volume()),
                     subnodes: None,
                     subnode_bounds: None,
-                    leaf: Some(i as u32),
+                    leaf: Some(i ),
                 }
             )
         }
@@ -422,19 +452,19 @@ impl RenderObjectBVH{
         }
 
         // Check sub node count
-        let mut remaining_nodes = vec![0u32];
+        let mut remaining_nodes = vec![0usize];
 
         while remaining_nodes.len() > 0 {
             let parent = remaining_nodes.pop().unwrap();
             self.bin_children(parent);
-            for node in self.nodes[parent as usize].subnodes.as_ref().unwrap(){
-                if self.nodes[node.clone() as usize].subnodes.as_ref().unwrap().len()>8{ // >8?
+            for node in self.nodes[parent ].subnodes.as_ref().unwrap(){
+                if self.nodes[node.clone() ].subnodes.as_ref().unwrap().len()>8{ // >8?
                     remaining_nodes.push(*node);
                 }
             }
         }
         self.bounding_volume(0);
-
+        self.pack_bvh();
         return;
         // for node in self.nodes.iter(){
         //     if node.subnodes.is_none() {continue;}
@@ -488,29 +518,61 @@ impl RenderObjectBVH{
     }
 }
 
+use std::cmp::Ordering;
+fn cmp_nan(a: f32, b:f32) -> Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => a.partial_cmp(&b).unwrap(),
+    }
+}
+
 impl Hittable for RenderObjectBVH{
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
         // let bvh_start = Instant::now();
         let ray_c = RayCx8::splat(ray);
 
-        let mut bvh_tests: Vec<u32> = vec![0];
+        let mut bvh_tests: Vec<usize> = vec![0];
+        //let mut bvh_dists: Vec<f32> = vec![0.0];
         let mut hit: Option<Hit> = None;
 
         let mut nearest: f32 = f32::MAX;
 
+        //let mut min_node: usize = 0;
+        //let mut min_dist = f32::MAX;
+        
         while bvh_tests.len() > 0{
-            let node = &self.nodes[bvh_tests.pop().unwrap().clone() as usize];
-            let hit_data: [f32; 8] = aabb_hit_8(&ray_c, node.subnode_bounds.unwrap().0, node.subnode_bounds.unwrap().1).into();
+            //println!("Vector has {} items", bvh_tests.len());
+            //let start_time = Instant::now();
+            // min_node = 0;
+            // min_dist = f32::MAX;
+
+            // for i in 0..bvh_tests.len(){
+            //     if bvh_dists[i] < min_dist {
+            //         min_dist = bvh_dists[i];
+            //         min_node = i;
+            //     }
+            // }
+            //bvh_dists.swap_remove(min_node);
+            let node = &self.packed_nodes[bvh_tests.pop().unwrap() ];//swap_remove(min_node) ];
+            let hit_data: [f32; 8] = aabb_hit_8(&ray_c, node.subnode_min_bound, node.subnode_max_bound).into();                        
+            //println!("{}",start_time.elapsed().as_nanos());
+
             
-            for (i, subnode) in node.subnodes.as_ref().unwrap().iter().enumerate() {
-                if hit_data[i].is_nan(){continue;}
-                if hit_data[i]>nearest {continue;}
+            for i in 0..node.subnodes.len() {
+                let t = hit_data[i];
+                if t == f32::MAX {continue;}
+                if t.is_nan() {continue;}
+                if t > nearest {continue;}
                 
-                let subnode_object = &self.nodes[subnode.clone() as usize];
-                if subnode_object.subnodes.is_some(){
-                    bvh_tests.push(subnode.clone());
-                } else if subnode_object.leaf.is_some() {
-                    let temp_hit = self.objects[subnode_object.leaf.unwrap() as usize].ray_test(ray);
+                let subnode_id = node.subnodes[i];
+                let subnode_object = &self.packed_nodes[subnode_id ];
+                if subnode_object.subnodes[0] != 0{
+                    //bvh_dists.push(t);
+                    bvh_tests.push(subnode_id.clone());
+                } else if subnode_object.leaf != usize::MAX {
+                    let temp_hit = self.objects[subnode_object.leaf].ray_test(ray);
                     if temp_hit.is_some() {
                         if hit.is_some(){
                             if hit.as_ref().unwrap().t>temp_hit.as_ref().unwrap().t {
@@ -636,7 +698,7 @@ fn aabb_hit_8(r: &RayCx8, min: uv::Vec3x8, max: uv::Vec3x8) -> uv::f32x8 {
     let tmin = uv::f32x8::max(uv::f32x8::max(uv::f32x8::min(t1, t2), uv::f32x8::min(t3, t4)), uv::f32x8::min(t5, t6));
     let tmax = uv::f32x8::min(uv::f32x8::min(uv::f32x8::max(t1, t2), uv::f32x8::max(t3, t4)), uv::f32x8::max(t5, t6));
 
-    tmax.cmp_lt(uv::f32x8::ZERO) | tmax.cmp_lt(tmin) | tmin
+    (tmax.cmp_lt(uv::f32x8::ZERO) | tmax.cmp_le(tmin)).blend(uv::f32x8::splat(f32::MAX), tmin)
 }
 
 // BVH AABB 
@@ -681,7 +743,7 @@ fn sample_sky(ray: &Ray) -> uv::Vec3{
     let sky_sample = horizon.lerp(apex, ray.d.y.clamp(0.0,1.0)).lerp(ground, (-5.0 * ray.d.y).clamp(0.0, 1.0).powf(0.5));
     let sun_sample = if ray.d.dot(sun_dir) < 0.9 { uv::Vec3::new(0.0,0.0,0.0)}else{sun} ;
 
-    2.0*(sky_sample + 2.0 * sun_sample)
+    0.0*(sky_sample + 2.0 * sun_sample)
 }
 
 fn trace_ray(ray: &Ray, scene:&dyn Hittable, depth: i32) -> uv::Vec3{ 
@@ -817,9 +879,9 @@ fn model_loader(model_string: &str) -> Vec<Trix8>
 
     let reader = BufReader::new(file);
     
-    let mut faces: Vec<(u32, u32, u32)> = Vec::new();
+    let mut faces: Vec<(usize, usize, usize)> = Vec::new();
     let mut verts: Vec<uv::Vec3> = Vec::new();
-    let mut faces_on_vert:Vec<Vec<u32>> = Vec::new();
+    let mut faces_on_vert:Vec<Vec<usize>> = Vec::new();
 
     for line in reader.lines() {
         let line = line.unwrap();
@@ -841,14 +903,14 @@ fn model_loader(model_string: &str) -> Vec<Trix8>
             },
             Some("f") => {
                 let attached_verts = (
-                    line_iter.next().unwrap().parse::<u32>().unwrap()-1,
-                    line_iter.next().unwrap().parse::<u32>().unwrap()-1,
-                    line_iter.next().unwrap().parse::<u32>().unwrap()-1,
+                    line_iter.next().unwrap().parse::<usize>().unwrap()-1,
+                    line_iter.next().unwrap().parse::<usize>().unwrap()-1,
+                    line_iter.next().unwrap().parse::<usize>().unwrap()-1,
                 );
-                let i = faces.len() as u32;
-                faces_on_vert[attached_verts.0 as usize].push(i);
-                faces_on_vert[attached_verts.1 as usize].push(i);
-                faces_on_vert[attached_verts.2 as usize].push(i);
+                let i = faces.len() ;
+                faces_on_vert[attached_verts.0 ].push(i);
+                faces_on_vert[attached_verts.1 ].push(i);
+                faces_on_vert[attached_verts.2 ].push(i);
                 faces.push(attached_verts);
             },
             Some(&_) => {},
@@ -857,12 +919,12 @@ fn model_loader(model_string: &str) -> Vec<Trix8>
     }
 
     println!("Creating Clusters");
-    let mut remaining_faces: HashSet<u32> = (0..faces.len() as u32).collect();
-    let mut clusters: Vec<Vec<u32>> = Vec::new();
+    let mut remaining_faces: HashSet<usize> = (0..faces.len() ).collect();
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
     while remaining_faces.len() > 0 {
-        let mut i: u32 = 0;
+        let mut i: usize = 0;
         
-        let mut cluster: Vec<u32> = vec![remaining_faces.take(&remaining_faces.iter().next().cloned().unwrap()).unwrap()];
+        let mut cluster: Vec<usize> = vec![remaining_faces.take(&remaining_faces.iter().next().cloned().unwrap()).unwrap()];
 
         let mut connected_faces = Vec::new();
             
@@ -870,18 +932,18 @@ fn model_loader(model_string: &str) -> Vec<Trix8>
 
         'cluster_loop: while cluster.len() < 8{
             while connected_faces.len() == 0 {
-                if i==cluster.len() as u32 {
+                if i==cluster.len()  {
                     break 'cluster_loop;
                 }
-                let face_verts = faces[cluster[i as usize] as usize];
-                connected_faces.append(&mut faces_on_vert[face_verts.0 as usize].clone());
-                connected_faces.append(&mut faces_on_vert[face_verts.1 as usize].clone());
-                connected_faces.append(&mut faces_on_vert[face_verts.2 as usize].clone());
+                let face_verts = faces[cluster[i ] ];
+                connected_faces.append(&mut faces_on_vert[face_verts.0 ].clone());
+                connected_faces.append(&mut faces_on_vert[face_verts.1 ].clone());
+                connected_faces.append(&mut faces_on_vert[face_verts.2 ].clone());
                 i+=1;
  
                 
             }
-            let face: u32 = connected_faces.pop().unwrap();
+            let face: usize = connected_faces.pop().unwrap();
             if connected_faces.contains(&face) || !remaining_faces.contains(&face)
                 { continue;}
             remaining_faces.remove(&face);
@@ -901,11 +963,11 @@ fn model_loader(model_string: &str) -> Vec<Trix8>
         let mut p2: [uv::Vec3; 8] = [nan3;8];
         let mut n:  [uv::Vec3; 8] = [nan3;8];
         for (i, v) in cluster.iter().enumerate() {
-            let face = faces[*v as usize];
+            let face = faces[*v ];
             let offset = uv::Vec3::new(0.0,0.0,-0.0);
-            p0[i] = verts[face.0 as usize]+offset;
-            p1[i] = verts[face.1 as usize]+offset;
-            p2[i] = verts[face.2 as usize]+offset;
+            p0[i] = verts[face.0 ]+offset;
+            p1[i] = verts[face.1 ]+offset;
+            p2[i] = verts[face.2 ]+offset;
             n[i]  = (p1[i]-p0[i]).cross(p2[i]-p0[i]).normalized();
         }
         let packed_cluster = Trix8{
@@ -963,15 +1025,23 @@ fn main(){
 
     //let teapot_tris = model_loader("models/teapot.obj");
     let sponza_tris = model_loader("models/sponza_simple.obj");
+    let box_a = model_loader("models/sponza_box_a.obj");
+    let box_b = model_loader("models/sponza_box_b.obj");
 
     let mut scene_model: Vec<Box<dyn Hittable>> = Vec::with_capacity(sponza_tris.len());
     
     let sponza_mat: Rc<dyn Material> = Rc::new(Diffuse{
-        col: uv::Vec3::new(0.7,0.7,0.7),
+        col: uv::Vec3::new(0.9,0.9,0.9),
         roughness: 1.0
         });
 
-
+    let light_blue: Rc<dyn Material> = Rc::new(Emmisive{
+        col: uv::Vec3::new(0.1,0.5,1.0)*5.0,
+        });
+    let light_red: Rc<dyn Material> = Rc::new(Emmisive{
+        col: uv::Vec3::new(1.0,0.1,0.4)*5.0,
+        });
+    
     // for tri_cluster in sponza_tris.into_iter() {
     //     let tau:[f32; 8] = uv::f32x8::TAU.into();
     //     let tau = tau[0];
@@ -998,14 +1068,6 @@ fn main(){
     // }
 
     for tri_cluster in sponza_tris.into_iter() {
-        let tau:[f32; 8] = uv::f32x8::TAU.into();
-        let tau = tau[0];
-        let hue = fastrand::f32()*tau;
-        let col =  1.25*uv::Vec3::new(
-           0.5+0.5*f32::sin(hue),
-           0.5+0.5*f32::sin(hue+tau/3.0),
-           0.5+0.5*f32::sin(hue+2.0*tau/3.0)
-        );
         scene_model.push(Box::new(
             TriClusterRenderObject { 
             tris: tri_cluster, 
@@ -1014,9 +1076,27 @@ fn main(){
         ));
     }
 
+    for tri_cluster in box_a.into_iter() {
+        scene_model.push(Box::new(
+            TriClusterRenderObject { 
+            tris: tri_cluster, 
+            mat: Rc::clone(&light_blue)
+           }
+        ));
+    }
+    for tri_cluster in box_b.into_iter() {
+        scene_model.push(Box::new(
+            TriClusterRenderObject { 
+            tris: tri_cluster, 
+            mat: Rc::clone(&light_red)
+           }
+        ));
+    }
+
     let mut render_object_bvh = RenderObjectBVH{
         objects: scene_model,
         nodes: vec![],
+        packed_nodes: vec![],
         mat: Rc::new(Emmisive{
             col: uv::Vec3::new(fastrand::f32(),fastrand::f32(),fastrand::f32()),
             }) 
@@ -1051,10 +1131,10 @@ fn main(){
             };
             let mut col: uv::Vec3 = uv::Vec3::new(0.0,0.0,0.0);
             for  _ in 0..samples {
-                col += trace_ray(&ray, &renderObjectList, 4)/(samples as f32);
+                col += trace_ray(&ray, &renderObjectList, 6)/(samples as f32);
             }
 
-
+            col = col/(col+uv::Vec3::one());
             let pixel = imgbuf.get_pixel_mut(x, y);
             *pixel = image::Rgb([(col.x*255.0) as u8, (col.y*255.0) as u8, (col.z*255.0) as u8]);
         }
