@@ -4,11 +4,14 @@ use ultraviolet as uv;
 use fastrand;
 use uv::Lerp;
 
-extern crate test;
-use test::Bencher;
 use uv::Vec3;
 use uv::Vec3x8;
+use std::borrow::Borrow;
 use std::ops::Index;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
+use std::thread;
 use std::time::{Duration, Instant};
 use std::rc::Rc;
 
@@ -534,44 +537,23 @@ impl Hittable for RenderObjectBVH{
         let ray_c = RayCx8::splat(ray);
 
         let mut bvh_tests: Vec<usize> = vec![0];
-        //let mut bvh_dists: Vec<f32> = vec![0.0];
         let mut hit: Option<Hit> = None;
 
         let mut nearest: f32 = f32::MAX;
 
-        //let mut min_node: usize = 0;
-        //let mut min_dist = f32::MAX;
-        
         while bvh_tests.len() > 0{
-            //println!("Vector has {} items", bvh_tests.len());
-            //let start_time = Instant::now();
-            // min_node = 0;
-            // min_dist = f32::MAX;
-
-            // for i in 0..bvh_tests.len(){
-            //     if bvh_dists[i] < min_dist {
-            //         min_dist = bvh_dists[i];
-            //         min_node = i;
-            //     }
-            // }
-            //bvh_dists.swap_remove(min_node);
-            let node = &self.packed_nodes[bvh_tests.pop().unwrap() ];//swap_remove(min_node) ];
-            let hit_data: [f32; 8] = aabb_hit_8(&ray_c, node.subnode_min_bound, node.subnode_max_bound).into();                        
-            //println!("{}",start_time.elapsed().as_nanos());
-
+            let node = &self.packed_nodes[bvh_tests.pop().unwrap().clone()];
+            let hit_data: [f32; 8] = aabb_hit_8(&ray_c, node.subnode_min_bound, node.subnode_max_bound).into();
             
-            for i in 0..node.subnodes.len() {
-                let t = hit_data[i];
-                if t == f32::MAX {continue;}
-                if t.is_nan() {continue;}
-                if t > nearest {continue;}
+            for (i, subnode) in node.subnodes.iter().enumerate() {
+                if subnode.clone() == 0 {continue;}
+                if hit_data[i].is_nan(){continue;}
+                if hit_data[i]>=nearest {continue;}
                 
-                let subnode_id = node.subnodes[i];
-                let subnode_object = &self.packed_nodes[subnode_id ];
-                if subnode_object.subnodes[0] != 0{
-                    //bvh_dists.push(t);
-                    bvh_tests.push(subnode_id.clone());
-                } else if subnode_object.leaf != usize::MAX {
+                let subnode_object = &self.packed_nodes[subnode.clone()];
+                if subnode_object.leaf == usize::MAX{
+                    bvh_tests.push(subnode.clone());
+                } else {
                     let temp_hit = self.objects[subnode_object.leaf].ray_test(ray);
                     if temp_hit.is_some() {
                         if hit.is_some(){
@@ -1008,6 +990,70 @@ fn model_loader(model_string: &str) -> Vec<Trix8>
 
 }
 
+struct Tile{
+    x1: usize,
+    x2: usize,
+    y1: usize,
+    y2: usize,
+    samples: usize,
+    depth: usize,
+    imgx: usize,
+    imgy: usize
+}
+
+fn render_thread(jobs: Arc<Mutex<Vec<Tile>>>, scene: Arc<RwLock<&dyn Hittable>>, color_buffer: Arc<Mutex<Vec<u8>>>){
+    let scene = *scene.read().unwrap();
+    loop{
+        let job = jobs.lock();
+        if job.is_ok(){
+            if job.as_ref().unwrap().len() > 0{
+                let tile = &job.unwrap().pop().unwrap();
+                let result = render_tile(scene, tile);
+
+                let mut image_lock = color_buffer.lock();
+                while image_lock.is_err(){
+                    image_lock = color_buffer.lock();
+                }
+                let mut color_buffer = image_lock.unwrap();
+                for (i, pixel) in result.iter().enumerate(){
+                    let x = tile.x1 + i%(tile.x2-tile.x1);
+                    let y =  tile.y1 + (i as usize)/(tile.x2-tile.x1);
+                    color_buffer[i+x+y*tile.imgy] = pixel.clone();
+                }
+
+            }
+        }
+    }
+}
+
+
+fn render_tile(scene: &dyn Hittable, tile: &Tile) -> Vec<u8>{
+    let mut result : Vec<u8> = Vec::with_capacity((tile.x2-tile.x1)*(tile.y2-tile.y1));
+
+    for y in tile.y1..tile.y2{
+        for x in tile.x1..tile.x2{
+            let ray: Ray = Ray{
+                o: uv::Vec3::new(5.0, 2.0, 0.0),
+                d: uv::Vec3::new(
+                    -1.0,
+                    1.0-2.0*(y as f32)/(tile.imgy as f32), 
+                    2.0*(x as f32)/(tile.imgx as f32)-1.0, 
+                ).normalized()
+            };
+            let mut col: uv::Vec3 = uv::Vec3::new(0.0,0.0,0.0);
+            for  _ in 0..tile.samples {
+                col += trace_ray(&ray, scene, tile.depth as i32)/(tile.samples as f32);
+            }
+
+            col = col/(col+uv::Vec3::one());
+            result.push((col.x*255.0) as u8);
+            result.push((col.y*255.0) as u8);
+            result.push((col.z*255.0) as u8);
+        }
+    }
+    result
+}
+
 
 
 fn main(){
@@ -1057,14 +1103,24 @@ fn main(){
     //             p0: tri_cluster.p0/uv::f32x8::splat(2.0), 
     //             p1: tri_cluster.p1/uv::f32x8::splat(2.0), 
     //             p2: tri_cluster.p2/uv::f32x8::splat(2.0), 
-    //             n: tri_cluster.n 
-    //         }, 
-    //         mat: Rc::new(Emmisive{
-    //             col: 2.0*col,
-    //         }) 
-    //         //mat: Rc::clone(&tea_pot_mat)
+    //            for tri_cluster in sponza_tris.into_iter() {
+        // scene_model.push(Box::new(
+        //     TriClusterRenderObject { 
+        //     tris: tri_cluster, 
+        //     mat: Rc::clone(&sponza_mat)
+        //    }
+        // ));
+    
+
+    // for tri_cluster in box_a.into_iter() {
+    //     scene_model.push(Box::new(
+    //         TriClusterRenderObject { 
+    //         tris: tri_cluster, 
+    //         mat: Rc::clone(&light_blue)
     //        }
-    //     ));
+    //     )); //mat: Rc::clone(&tea_pot_mat)
+    // //        }
+    // //     ));
     // }
 
     for tri_cluster in sponza_tris.into_iter() {
@@ -1111,35 +1167,91 @@ fn main(){
                     Box::new(test_floor)
                 ]
         };
-    let imgx = 128;
-    let imgy = 128;
+    let imgx = 1024;
+    let imgy = 1024;
     let samples = 8;
+    let depth = 6;
+    let tile_size = 8;
 
-    let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
-
-
-    let start_time = Instant::now();
-    for y in 0..imgy {
-        for x in 0..imgx {
-            let ray: Ray = Ray{
-                o: uv::Vec3::new(5.0, 2.0, 0.0),
-                d: uv::Vec3::new(
-                    -1.0,
-                    1.0-2.0*(y as f32)/(imgy as f32), 
-                    2.0*(x as f32)/(imgx as f32)-1.0, 
-                ).normalized()
-            };
-            let mut col: uv::Vec3 = uv::Vec3::new(0.0,0.0,0.0);
-            for  _ in 0..samples {
-                col += trace_ray(&ray, &renderObjectList, 6)/(samples as f32);
-            }
-
-            col = col/(col+uv::Vec3::one());
-            let pixel = imgbuf.get_pixel_mut(x, y);
-            *pixel = image::Rgb([(col.x*255.0) as u8, (col.y*255.0) as u8, (col.z*255.0) as u8]);
+    let mut tiles: Vec<Tile> = vec![];
+    for j in 0..imgy/tile_size {
+        for i in 0..imgx/tile_size {
+            tiles.push(Tile{
+                x1: i*tile_size,
+                x2: usize::min((i+1)*tile_size,imgx),
+                y1: j*tile_size,
+                y2: usize::min((j+1)*tile_size,imgy),
+                samples,
+                depth,
+                imgx,
+                imgy
+            });
         }
-        println!("{}",  y);
     }
+    println!("Starting render!");
+    let start_time = Instant::now();
+
+    let mut jobs: Arc<Mutex<Vec<Tile>>> = Arc::new(Mutex::new(vec![]));
+
+
+    let scene = Arc::new(&renderObjectList);
+
+    let color_buffer = Arc::new(Mutex::new(Vec::<u8>::with_capacity(3*imgx*imgy)));
+    let handle = thread::spawn(|| render_thread(jobs.clone(), scene.clone(), color_buffer.clone()));
+    
+
+    loop{
+        let locked_jobs = jobs.lock();
+        if locked_jobs.is_ok(){
+            let remaining = locked_jobs.unwrap().len();
+            println!("Tiles remaining: {}", remaining);
+            if remaining == 0{
+                break;
+            }
+        }else{
+            println!("Missed lock");
+        }
+    }
+
+    let color_buffer = color_buffer.lock().unwrap();
+    
+    
+    let mut imgbuf: image::RgbImage  = image::ImageBuffer::new(imgx as u32, imgy as u32);
+    
+    for i in 0..imgx*imgy{
+        imgbuf.put_pixel((i%imgx) as u32, (i/imgx) as u32, image::Rgb([
+            color_buffer[3*i+0],
+            color_buffer[3*i+1],
+            color_buffer[3*i+2]
+            ]))
+    }
+//}
+
+//     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
+
+
+//     let start_time = Instant::now();
+//     for y in 0..imgy {
+//         for x in 0..imgx {
+//             let ray: Ray = Ray{
+//                 o: uv::Vec3::new(5.0, 2.0, 0.0),
+//                 d: uv::Vec3::new(
+//                     -1.0,
+//                     1.0-2.0*(y as f32)/(imgy as f32), 
+//                     2.0*(x as f32)/(imgx as f32)-1.0, 
+//                 ).normalized()
+//             };
+//             let mut col: uv::Vec3 = uv::Vec3::new(0.0,0.0,0.0);
+//             for  _ in 0..samples {
+//                 col += trace_ray(&ray, &renderObjectList, 6)/(samples as f32);
+//             }
+
+//             col = col/(col+uv::Vec3::one());
+//             let pixel = imgbuf.get_pixel_mut(x, y);
+//             *pixel = image::Rgb([(col.x*255.0) as u8, (col.y*255.0) as u8, (col.z*255.0) as u8]);
+//         }
+//         println!("{}",  y);
+//     }
     let duration = start_time.elapsed().as_millis();
     println!("Rendered in {}ms", duration);
     // Save the image as “fractal.png”, the format is deduced from the path
