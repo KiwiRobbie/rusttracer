@@ -316,7 +316,6 @@ struct BvhNode {
 struct RenderObjectBVH {
     objects: Vec<Box<dyn Hittable>>,
     nodes: Vec<BvhNode>,
-    mat: Rc<dyn Material>,
 }
 
 impl RenderObjectBVH {
@@ -351,7 +350,7 @@ impl RenderObjectBVH {
     }
 
     fn split_nodes(&self, mut nodes: Vec<u32>, axis: usize) -> (Vec<u32>, Vec<u32>) {
-        if (nodes.len() <= 8) {
+        if nodes.len() <= 8 {
             return (nodes, vec![]);
         }
 
@@ -988,9 +987,6 @@ fn main() {
     let mut render_object_bvh = RenderObjectBVH {
         objects: scene_model,
         nodes: vec![],
-        mat: Rc::new(Emmisive {
-            col: uv::Vec3::new(fastrand::f32(), fastrand::f32(), fastrand::f32()),
-        }),
     };
 
     render_object_bvh.update_bvh();
