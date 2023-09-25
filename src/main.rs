@@ -1037,22 +1037,23 @@ fn main() {
         }));
     }
 
-    let mut render_object_bvh = RenderObjectBvhBuilder {
+    let mut bvh_builder = RenderObjectBvhBuilder {
         objects: scene_model,
         nodes: vec![],
     };
 
-    render_object_bvh.update_bvh();
+    bvh_builder.update_bvh();
 
     if let Some(bvh_dump) = args.dump_bvh {
-        render_object_bvh.dump_bvh(Path::new(&bvh_dump));
+        bvh_builder.dump_bvh(Path::new(&bvh_dump));
     }
 
-    let render_object_list = RenderObjectList {
-        objects: vec![Box::new(render_object_bvh.build()), Box::new(test_floor)],
+    let root_render_object = RenderObjectList {
+        objects: vec![Box::new(bvh_builder.build()), Box::new(test_floor)],
     };
 
     let mut img_buf = image::ImageBuffer::new(args.width, args.height);
+    let aspect_ratio = args.width as f32 / args.height as f32;
 
     let mut stdout = stdout();
     stdout.execute(cursor::Hide).unwrap();
@@ -1062,18 +1063,22 @@ fn main() {
             if exit_flag.as_ref().load(Ordering::Relaxed) {
                 panic!("Interupt received");
             }
-            let ray: Ray = Ray {
-                o: uv::Vec3::new(5.0, 2.0, 0.0),
-                d: uv::Vec3::new(
-                    -1.0,
-                    1.0 - 2.0 * (y as f32) / (args.height as f32),
-                    2.0 * (x as f32) / (args.width as f32) - 1.0,
-                )
-                .normalized(),
-            };
+            let u = 1.0 - 2.0 * y as f32 / args.height as f32;
+            let v = 2.0 * x as f32 / args.width as f32 - 1.0;
+
+            let du = -2.0 / args.height as f32;
+            let dv = 2.0 / args.width as f32;
+
             let mut col: uv::Vec3 = uv::Vec3::new(0.0, 0.0, 0.0);
             for _ in 0..args.samples {
-                col += trace_ray(&ray, &render_object_list, 4) / (args.samples as f32);
+                let jitter_u = (fastrand::f32() - 0.5) * du;
+                let jitter_v = (fastrand::f32() - 0.5) * dv;
+                let ray: Ray = Ray {
+                    o: uv::Vec3::new(5.0, 2.0, 0.0),
+                    d: uv::Vec3::new(-1.0, u + jitter_u, (v + jitter_v) * aspect_ratio)
+                        .normalized(),
+                };
+                col += trace_ray(&ray, &root_render_object, 4) / (args.samples as f32);
             }
 
             let pixel = img_buf.get_pixel_mut(x, y);
