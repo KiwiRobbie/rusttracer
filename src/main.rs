@@ -306,11 +306,29 @@ impl Hittable for RenderObjectList {
     }
 }
 
-struct BvhNode {
+struct BvhNodeBuilder {
     bound: Option<Aabb>,
-    subnodes: Option<Vec<u32>>,
+    subnodes: Option<Vec<usize>>,
     subnode_bounds: Option<Aabbx8>,
-    leaf: Option<u32>,
+    leaf: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum BvhNodeIndex {
+    Node(usize),
+    Leaf(usize),
+    None,
+}
+
+#[derive(Clone)]
+struct BvhNode {
+    subnodes: [BvhNodeIndex; 8],
+    subnode_bounds: Aabbx8,
+}
+
+struct RenderObjectBvhBuilder {
+    objects: Vec<Box<dyn Hittable>>,
+    nodes: Vec<BvhNodeBuilder>,
 }
 
 struct RenderObjectBVH {
@@ -318,38 +336,77 @@ struct RenderObjectBVH {
     nodes: Vec<BvhNode>,
 }
 
-impl RenderObjectBVH {
-    fn bounding_volume(mut self: &mut Self, idx: u32) -> &mut Self {
+impl RenderObjectBvhBuilder {
+    fn build(self) -> RenderObjectBVH {
+        let mut new_indices: Vec<BvhNodeIndex> = vec![BvhNodeIndex::None; self.nodes.len()];
+        let mut new_index: usize = 0;
+        for (old_index, node) in self.nodes.iter().enumerate() {
+            if let Some(leaf) = node.leaf {
+                new_indices[old_index] = BvhNodeIndex::Leaf(leaf);
+            } else {
+                new_indices[old_index] = BvhNodeIndex::Node(new_index);
+                new_index += 1;
+            }
+        }
+        let mut nodes: Vec<Option<BvhNode>> = vec![None; new_index];
+
+        for (old_index, new_index) in new_indices.iter().enumerate() {
+            if let BvhNodeIndex::Node(id) = new_index {
+                let old_node = &self.nodes[old_index];
+                nodes[*id] = Some(BvhNode {
+                    subnode_bounds: old_node.subnode_bounds.unwrap(),
+                    subnodes: [0, 1, 2, 3, 4, 5, 6, 7].map(|i| {
+                        old_node
+                            .subnodes
+                            .as_ref()
+                            .unwrap()
+                            .get(i)
+                            .map(|i| new_indices[*i])
+                            .unwrap_or(BvhNodeIndex::None)
+                            .clone()
+                    }),
+                });
+            }
+        }
+        let nodes: Vec<BvhNode> = nodes.into_iter().map(|node| node.unwrap()).collect();
+        RenderObjectBVH {
+            objects: self.objects,
+            nodes,
+        }
+    }
+
+    fn bounding_volume(mut self: &mut Self, idx: usize) -> &mut Self {
         let mut min = uv::Vec3::new(f32::MAX, f32::MAX, f32::MAX);
         let mut max = uv::Vec3::new(f32::MIN, f32::MIN, f32::MIN);
 
         let mut s_min: [uv::Vec3; 8] = [uv::Vec3::new(f32::MAX, f32::MAX, f32::MAX); 8];
         let mut s_max: [uv::Vec3; 8] = [uv::Vec3::new(f32::MIN, f32::MIN, f32::MIN); 8];
 
-        for (i, subnode) in self.nodes[idx as usize]
+        for (i, subnode) in self.nodes[idx]
             .subnodes
-            .clone()
+            .as_ref()
             .unwrap()
+            .clone()
             .iter()
             .enumerate()
         {
-            if self.nodes[subnode.clone() as usize].bound.is_none() {
-                self = RenderObjectBVH::bounding_volume(self, subnode.clone());
+            if self.nodes[subnode.clone()].bound.is_none() {
+                self = RenderObjectBvhBuilder::bounding_volume(self, subnode.clone());
             }
-            let subnode_bounds = self.nodes[subnode.clone() as usize].bound.unwrap();
+            let subnode_bounds = self.nodes[*subnode].bound.unwrap();
 
             min = min.min_by_component(subnode_bounds.0);
             max = max.max_by_component(subnode_bounds.1);
             s_min[i] = subnode_bounds.0;
             s_max[i] = subnode_bounds.1;
         }
-        let target_node = &mut self.nodes[idx as usize];
+        let target_node = &mut self.nodes[idx];
         target_node.bound = Some((min, max));
         target_node.subnode_bounds = Some((s_min.into(), s_max.into()));
         self
     }
 
-    fn split_nodes(&self, mut nodes: Vec<u32>, axis: usize) -> (Vec<u32>, Vec<u32>) {
+    fn split_nodes(&self, mut nodes: Vec<usize>, axis: usize) -> (Vec<usize>, Vec<usize>) {
         if nodes.len() <= 8 {
             return (nodes, vec![]);
         }
@@ -368,11 +425,8 @@ impl RenderObjectBVH {
         (nodes, split)
     }
 
-    fn bin_children(&mut self, idx: u32) {
-        let (a, e) = self.split_nodes(
-            self.nodes[idx as usize].subnodes.as_ref().unwrap().clone(),
-            0,
-        );
+    fn bin_children(&mut self, idx: usize) {
+        let (a, e) = self.split_nodes(self.nodes[idx].subnodes.as_ref().unwrap().clone(), 0);
         let (a, c) = self.split_nodes(a, 1);
         let (a, b) = self.split_nodes(a, 2);
         let (c, d) = self.split_nodes(c, 2);
@@ -381,12 +435,12 @@ impl RenderObjectBVH {
         let (e, f) = self.split_nodes(e, 2);
         let (g, h) = self.split_nodes(g, 2);
 
-        let mut subnodes: Vec<u32> = Vec::new();
+        let mut subnodes: Vec<usize> = Vec::new();
 
         for node in [a, b, c, d, e, f, g, h] {
             if node.len() > 0 {
-                subnodes.push(self.nodes.len() as u32);
-                self.nodes.push(BvhNode {
+                subnodes.push(self.nodes.len() as usize);
+                self.nodes.push(BvhNodeBuilder {
                     bound: None,
                     subnodes: Some(node),
                     subnode_bounds: None,
@@ -398,21 +452,21 @@ impl RenderObjectBVH {
     }
 
     fn update_bvh(&mut self) {
-        self.nodes = vec![BvhNode {
+        self.nodes = vec![BvhNodeBuilder {
             bound: None,
             subnodes: None,
             subnode_bounds: None,
             leaf: None,
         }];
 
-        let mut leaves: Vec<u32> = Vec::new();
+        let mut leaves: Vec<usize> = Vec::new();
         for (i, object) in self.objects.iter().enumerate() {
-            leaves.push(self.nodes.len() as u32);
-            self.nodes.push(BvhNode {
+            leaves.push(self.nodes.len());
+            self.nodes.push(BvhNodeBuilder {
                 bound: Some(object.bounding_volume()),
                 subnodes: None,
                 subnode_bounds: None,
-                leaf: Some(i as u32),
+                leaf: Some(i),
             })
         }
 
@@ -423,7 +477,7 @@ impl RenderObjectBVH {
         }
 
         // Check sub node count
-        let mut remaining_nodes = vec![0u32];
+        let mut remaining_nodes = vec![0usize];
 
         while remaining_nodes.len() > 0 {
             let parent = remaining_nodes.pop().unwrap();
@@ -511,25 +565,24 @@ impl Hittable for RenderObjectBVH {
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
         let ray_c = RayCx8::splat(ray);
 
-        let mut bvh_tests: Vec<u32> = vec![0];
-        let mut final_tests: Vec<u32> = vec![];
+        let mut bvh_tests: Vec<usize> = vec![0];
+        let mut final_tests: Vec<usize> = vec![];
 
         while bvh_tests.len() > 0 {
-            let node = &self.nodes[bvh_tests.pop().unwrap().clone() as usize];
-            let hit_data: [f32; 8] = aabb_hit_8(
-                &ray_c,
-                node.subnode_bounds.unwrap().0,
-                node.subnode_bounds.unwrap().1,
-            )
-            .into();
+            let node = &self.nodes[bvh_tests.pop().unwrap()];
+            let hit_data: [f32; 8] =
+                aabb_hit_8(&ray_c, node.subnode_bounds.0, node.subnode_bounds.1).into();
 
-            for (i, subnode) in node.subnodes.as_ref().unwrap().iter().enumerate() {
+            for (i, subnode) in node.subnodes.as_ref().iter().enumerate() {
                 if hit_data[i].is_nan() {
-                    let subnode_object = &self.nodes[subnode.clone() as usize];
-                    if subnode_object.subnodes.is_some() {
-                        bvh_tests.push(subnode.clone());
-                    } else if subnode_object.leaf.is_some() {
-                        final_tests.push(subnode_object.leaf.unwrap());
+                    match subnode {
+                        BvhNodeIndex::Node(index) => {
+                            bvh_tests.push(*index);
+                        }
+                        BvhNodeIndex::Leaf(index) => {
+                            final_tests.push(*index);
+                        }
+                        BvhNodeIndex::None => {}
                     }
                 }
             }
@@ -538,7 +591,7 @@ impl Hittable for RenderObjectBVH {
         let mut hit: Option<Hit> = None;
         while final_tests.len() > 0 {
             let n = final_tests.pop().unwrap();
-            let temp_hit = self.objects[n as usize].as_ref().ray_test(ray);
+            let temp_hit = self.objects[n].as_ref().ray_test(ray);
             if temp_hit.is_some() {
                 if hit.is_some() {
                     if hit.as_ref().unwrap().t > temp_hit.as_ref().unwrap().t {
@@ -984,7 +1037,7 @@ fn main() {
         }));
     }
 
-    let mut render_object_bvh = RenderObjectBVH {
+    let mut render_object_bvh = RenderObjectBvhBuilder {
         objects: scene_model,
         nodes: vec![],
     };
@@ -996,7 +1049,7 @@ fn main() {
     }
 
     let render_object_list = RenderObjectList {
-        objects: vec![Box::new(render_object_bvh), Box::new(test_floor)],
+        objects: vec![Box::new(render_object_bvh.build()), Box::new(test_floor)],
     };
 
     let mut img_buf = image::ImageBuffer::new(args.width, args.height);
