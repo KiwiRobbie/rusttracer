@@ -4,18 +4,17 @@ use clap::Parser;
 use crossterm::{cursor, terminal, ExecutableCommand, QueueableCommand};
 use fastrand;
 use std::io::{stdout, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use ultraviolet as uv;
 use uv::Lerp;
 
 extern crate test;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
-use test::Bencher;
+use std::time::Instant;
 use uv::Vec3;
-use uv::Vec3x8;
 
 use std::collections::hash_set::HashSet;
-use std::default;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
@@ -24,7 +23,6 @@ use std::path::Path;
 
 const EPSILON: f32 = 0.00001;
 
-// Basic data structs
 struct Ray {
     o: uv::Vec3,
     d: uv::Vec3,
@@ -116,7 +114,7 @@ struct PlaneRenderObject {
 }
 
 impl PlaneRenderObject {
-    fn normal(&self, pos: uv::Vec3) -> uv::Vec3 {
+    fn normal(&self, _pos: uv::Vec3) -> uv::Vec3 {
         self.plane.n
     }
 }
@@ -288,13 +286,12 @@ impl Hittable for RenderObjectList {
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
         let mut hit: Option<Hit> = None;
 
-        for (i, object) in self.objects.iter().enumerate() {
+        for object in self.objects.iter() {
             let temp_hit = (&*object).ray_test(ray);
 
-            if hit.is_some() {
+            if let Some(Hit { t, .. }) = hit {
                 if let Some(u_t_hit) = temp_hit {
-                    let u_hit = hit.as_ref().unwrap();
-                    if u_t_hit.t < u_hit.t {
+                    if u_t_hit.t < t {
                         hit = Some(u_t_hit);
                     }
                 }
@@ -440,21 +437,16 @@ impl RenderObjectBVH {
                     .len()
                     > 8
                 {
-                    // >8?
                     remaining_nodes.push(*node);
                 }
             }
         }
         self.bounding_volume(0);
+    }
 
-        return;
-        // for node in self.nodes.iter(){
-        //     if node.subnodes.is_none() {continue;}
-        //     println!("{}",node.subnodes.as_ref().unwrap().len());
-        // }
-
-        println!("Writting bvh to file");
-        let f = File::create("models/bvh.obj").expect("Unable to create file");
+    fn dump_bvh(&self, file: &Path) {
+        println!("Writting BVH to file");
+        let f = File::create(file).expect("Unable to create file to dump BVH");
         let mut f = BufWriter::new(f);
 
         let mut boxes = 0;
@@ -471,7 +463,8 @@ impl RenderObjectBVH {
                 let x = if v % 2 == 0 { min.x } else { max.x };
                 let y = if (v / 2) % 2 == 0 { min.y } else { max.y };
                 let z = if (v / 4) % 2 == 0 { min.z } else { max.z };
-                f.write_fmt(format_args!("v {:0.6} {:0.6} {:0.6}\n", x, y, z));
+                f.write_fmt(format_args!("v {:0.6} {:0.6} {:0.6}\n", x, y, z))
+                    .unwrap();
             }
         }
 
@@ -490,18 +483,33 @@ impl RenderObjectBVH {
                 (2, 3),
                 (3, 1),
             ] {
-                let A = 1 + n * 8 + a;
-                let B = 1 + n * 8 + b;
-                f.write_fmt(format_args!("l {} {}\n", A, B));
+                let i = 1 + n * 8 + a;
+                let j = 1 + n * 8 + b;
+                f.write_fmt(format_args!("l {} {}\n", i, j)).unwrap();
             }
         }
-        let a = 0;
+        for n in 0..boxes {
+            for (u, v) in [(1, 2), (2, 4), (4, 1)] {
+                let i = 1 + n * 8;
+                let j = 1 + n * 8 + u;
+                let k = 1 + n * 8 + u + v;
+                let l = 1 + n * 8 + v;
+                f.write_fmt(format_args!("f {} {} {} {}\n", i, j, k, l))
+                    .unwrap();
+                let i = n * 8 + 8;
+                let j = n * 8 + 8 - u;
+                let k = n * 8 + 8 - u - v;
+                let l = n * 8 + 8 - v;
+                f.write_fmt(format_args!("f {} {} {} {}\n", i, j, k, l))
+                    .unwrap();
+            }
+        }
+        println!("BVH written to file")
     }
 }
 
 impl Hittable for RenderObjectBVH {
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
-        // let bvh_start = Instant::now();
         let ray_c = RayCx8::splat(ray);
 
         let mut bvh_tests: Vec<u32> = vec![0];
@@ -526,12 +534,7 @@ impl Hittable for RenderObjectBVH {
                     }
                 }
             }
-            //println!("Took {}ns", start_hit.elapsed().as_nanos());
         }
-
-        // let bvh_duration = bvh_start.elapsed().as_nanos();
-        // let hits_found = final_tests.len();
-        // let final_start = Instant::now();
 
         let mut hit: Option<Hit> = None;
         while final_tests.len() > 0 {
@@ -547,13 +550,6 @@ impl Hittable for RenderObjectBVH {
                 }
             }
         }
-        // let final_duration = final_start.elapsed().as_nanos();
-        // let method_duration = bvh_start.elapsed().as_nanos();
-        // let total_duration = final_duration + bvh_duration;
-        // if hit.is_some() || true{
-        //     println!("BVH traversed in: {}ns, {} possible hits found", bvh_duration, hits_found);
-        //     println!("Final tests took {}ns, total time {}ns, method time {}ns\n", final_duration, total_duration,method_duration);
-        // }
         hit
     }
 
@@ -562,7 +558,6 @@ impl Hittable for RenderObjectBVH {
     }
 }
 
-// Materials
 trait Material {
     fn scatter(&self, ray: &Ray, hit: &Hit) -> Option<Ray>;
     fn sample(&self, ray: &Ray, hit: &Hit) -> uv::Vec3;
@@ -598,7 +593,7 @@ impl Material for Glossy {
             d: ray.d - 2.0 * (ray.d.dot(hit.norm)) * hit.norm,
         })
     }
-    fn sample(&self, ray: &Ray, hit: &Hit) -> uv::Vec3 {
+    fn sample(&self, _ray: &Ray, _hit: &Hit) -> uv::Vec3 {
         self.col
     }
 }
@@ -623,21 +618,20 @@ impl Material for Diffuse {
         })
     }
 
-    fn sample(&self, ray: &Ray, hit: &Hit) -> uv::Vec3 {
+    fn sample(&self, _ray: &Ray, _hit: &Hit) -> uv::Vec3 {
         self.col
     }
 }
 
 impl Material for Emmisive {
-    fn scatter(&self, ray: &Ray, hit: &Hit) -> Option<Ray> {
+    fn scatter(&self, _ray: &Ray, _hit: &Hit) -> Option<Ray> {
         None
     }
-    fn sample(&self, ray: &Ray, hit: &Hit) -> uv::Vec3 {
+    fn sample(&self, _ray: &Ray, _hit: &Hit) -> uv::Vec3 {
         self.col
     }
 }
 
-// BVH AABBx8
 fn aabb_hit_8(r: &RayCx8, min: uv::Vec3x8, max: uv::Vec3x8) -> uv::f32x8 {
     let t1 = (min.x - r.o.x) * r.i.x;
     let t2 = (max.x - r.o.x) * r.i.x;
@@ -656,39 +650,6 @@ fn aabb_hit_8(r: &RayCx8, min: uv::Vec3x8, max: uv::Vec3x8) -> uv::f32x8 {
     );
 
     tmax.cmp_ge(uv::f32x8::ZERO) & tmax.cmp_ge(tmin)
-}
-
-// BVH AABB
-fn aabb_hit(r: &Ray, min: uv::Vec3, max: uv::Vec3) -> bool {
-    let dirfrac_x = 1.0 / r.d.x;
-    let dirfrac_y = 1.0 / r.d.y;
-    let dirfrac_z = 1.0 / r.d.z;
-    // lb is the corner of AABB with minimal coordinates - left bottom, rt is maximal corner
-    // r.org is origin of ray
-    let t1 = (min.x - r.o.x) * dirfrac_x;
-    let t2 = (max.x - r.o.x) * dirfrac_x;
-    let t3 = (min.y - r.o.y) * dirfrac_y;
-    let t4 = (max.y - r.o.y) * dirfrac_y;
-    let t5 = (min.z - r.o.z) * dirfrac_z;
-    let t6 = (max.z - r.o.z) * dirfrac_z;
-
-    let tmin = f32::max(
-        f32::max(f32::min(t1, t2), f32::min(t3, t4)),
-        f32::min(t5, t6),
-    );
-    let tmax = f32::min(
-        f32::min(f32::max(t1, t2), f32::max(t3, t4)),
-        f32::max(t5, t6),
-    );
-
-    // if tmax < 0, ray (line) is intersecting AABB, but the whole AABB is behind us
-    if (tmax < 0.0) {
-        return false;
-    }
-    if (tmin > tmax) {
-        return false;
-    }
-    return true;
 }
 
 fn sample_sky(ray: &Ray) -> uv::Vec3 {
@@ -742,8 +703,9 @@ fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
     h = ray.d.cross(edge2);
     a = edge1.dot(h);
     if a > -EPSILON && a < EPSILON {
+        // This ray is parallel to this triangle.
         return f32::MAX;
-    } // This ray is parallel to this triangle.
+    }
 
     f = 1.0 / a;
     s = ray.o - tri.p0;
@@ -759,9 +721,8 @@ fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
     }
     // At this stage we can compute t to find out where the intersection point is on the line.
     let t = f * edge2.dot(q);
-    if t > EPSILON
-    // ray intersection
-    {
+    if t > EPSILON {
+        // ray intersection
         return t;
     }
     // This means that there is a line intersection but not a ray intersection.
@@ -779,45 +740,25 @@ fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
     a = edge1.dot(h);
 
     let invalid = a.cmp_gt(-epsilon_x8) & a.cmp_lt(epsilon_x8);
-    // if -EPSILON < a && a < EPSILON
-    //     { return f32::MAX; }   // This ray is parallel to this triangle.
 
     f = uv::f32x8::ONE / a;
     s = ray.o - tri.p0;
     u = f * s.dot(h);
 
     let invalid = invalid | u.cmp_lt(uv::f32x8::ZERO) | u.cmp_gt(uv::f32x8::ONE);
-    // if u < 0.0 || u > 1.0
-    //    { return f32::MAX; }
 
     q = s.cross(edge1);
     v = f * ray.d.dot(q);
 
     let invalid = invalid | v.cmp_lt(uv::f32x8::ZERO) | (u + v).cmp_gt(uv::f32x8::ONE);
-    // if v < 0.0 || u + v > 1.0
-    //    { return f32::MAX; }
 
     // At this stage we can compute t to find out where the intersection point is on the line.
     let t = f * edge2.dot(q);
 
     // This means that there is a line intersection but not a ray intersection.
     let invalid = invalid | t.cmp_le(epsilon_x8) | (tri.p0.x * uv::f32x8::ZERO);
-    // if t <= EPSILON
-    //    { return f32::MAX; }
 
     invalid.blend(uv::f32x8::splat(f32::MAX), t)
-}
-
-fn tri_vec_intersect(input: (&Vec<Tri>, &Ray)) -> Vec<f32> {
-    let mut res: Vec<f32> = Vec::with_capacity(input.0.len());
-    for tri in input.0 {
-        res.push(tri_intersect(tri, input.1));
-    }
-    return res;
-}
-
-fn tri_vec_intersect_8(input: (&Trix8, &Ray)) -> uv::f32x8 {
-    tri_intersect_8(input.0, input.1)
 }
 
 fn model_loader(model_string: &str) -> Vec<Trix8> {
@@ -827,7 +768,7 @@ fn model_loader(model_string: &str) -> Vec<Trix8> {
     let display = path.display();
 
     // Open the path in read-only mode, returns `io::Result<File>`
-    let mut file = match File::open(&path) {
+    let file = match File::open(&path) {
         Err(why) => panic!("couldn't open {}: {}", display, why),
         Ok(file) => file,
     };
@@ -973,17 +914,25 @@ struct CliArguments {
 
     #[clap(short = 's', long, default_value = "render.png")]
     output: String,
+
+    #[clap(short = 'd', long)]
+    dump_bvh: Option<String>,
 }
 
 fn main() {
     let args = CliArguments::parse();
     let output_path = Path::new(&args.output);
-    ctrlc::set_handler(move || {
-        let mut stdout = stdout();
-        stdout.execute(cursor::Show).unwrap();
-        panic!();
-    })
-    .unwrap();
+
+    let exit_flag = Arc::new(AtomicBool::new(false));
+    {
+        let handler_exit_flag = exit_flag.clone();
+        ctrlc::set_handler(move || {
+            let mut stdout = stdout();
+            stdout.execute(cursor::Show).unwrap();
+            handler_exit_flag.store(true, Ordering::Relaxed)
+        })
+        .unwrap();
+    }
 
     // Scene creation
     let test_floor = PlaneRenderObject {
@@ -997,42 +946,39 @@ fn main() {
         }),
     };
 
-    //let teapot_tris = model_loader("models/teapot.obj");
+    let teapot_tris = model_loader("models/teapot.obj");
     let sponza_tris = model_loader("models/sponza_simple.obj");
 
-    let mut scene_model: Vec<Box<dyn Hittable>> = Vec::with_capacity(sponza_tris.len());
+    let mut scene_model: Vec<Box<dyn Hittable>> =
+        Vec::with_capacity(sponza_tris.len() + teapot_tris.len());
 
     let sponza_mat: Rc<dyn Material> = Rc::new(Diffuse {
         col: uv::Vec3::new(0.7, 0.7, 0.7),
         roughness: 1.0,
     });
 
-    // for tri_cluster in sponza_tris.into_iter() {
-    //     let tau: [f32; 8] = uv::f32x8::TAU.into();
-    //     let tau = tau[0];
-    //     let hue = fastrand::f32() * tau;
-    //     let col = 1.25
-    //         * uv::Vec3::new(
-    //             0.5 + 0.5 * f32::sin(hue),
-    //             0.5 + 0.5 * f32::sin(hue + tau / 3.0),
-    //             0.5 + 0.5 * f32::sin(hue + 2.0 * tau / 3.0),
-    //         );
-    //     scene_model.push(Box::new(TriClusterRenderObject {
-    //         tris: Trix8 {
-    //             p0: tri_cluster.p0 / uv::f32x8::splat(2.0),
-    //             p1: tri_cluster.p1 / uv::f32x8::splat(2.0),
-    //             p2: tri_cluster.p2 / uv::f32x8::splat(2.0),
-    //             n: tri_cluster.n,
-    //         },
-    //         mat: Rc::new(Emmisive { col: 2.0 * col }), //mat: Rc::clone(&tea_pot_mat)
-    //     }));
-    // }
+    for tri_cluster in teapot_tris.into_iter() {
+        let tau: [f32; 8] = uv::f32x8::TAU.into();
+        let tau = tau[0];
+        let hue = fastrand::f32() * tau;
+        let col = 1.25
+            * uv::Vec3::new(
+                0.5 + 0.5 * f32::sin(hue),
+                0.5 + 0.5 * f32::sin(hue + tau / 3.0),
+                0.5 + 0.5 * f32::sin(hue + 2.0 * tau / 3.0),
+            );
+        scene_model.push(Box::new(TriClusterRenderObject {
+            tris: Trix8 {
+                p0: tri_cluster.p0 / uv::f32x8::splat(2.0),
+                p1: tri_cluster.p1 / uv::f32x8::splat(2.0),
+                p2: tri_cluster.p2 / uv::f32x8::splat(2.0),
+                n: tri_cluster.n,
+            },
+            mat: Rc::new(Emmisive { col: 2.0 * col }), //mat: Rc::clone(&tea_pot_mat)
+        }));
+    }
 
     for tri_cluster in sponza_tris.into_iter() {
-        // let tau: [f32; 8] = uv::f32x8::TAU.into();
-        // let tau = tau[0];
-        // let hue = fastrand::f32() * tau;
-
         scene_model.push(Box::new(TriClusterRenderObject {
             tris: tri_cluster,
             mat: Rc::clone(&sponza_mat),
@@ -1049,19 +995,24 @@ fn main() {
 
     render_object_bvh.update_bvh();
 
+    if let Some(bvh_dump) = args.dump_bvh {
+        render_object_bvh.dump_bvh(Path::new(&bvh_dump));
+    }
+
     let render_object_list = RenderObjectList {
         objects: vec![Box::new(render_object_bvh), Box::new(test_floor)],
     };
 
     let mut img_buf = image::ImageBuffer::new(args.width, args.height);
 
-    println!("Rendering");
     let mut stdout = stdout();
-
     stdout.execute(cursor::Hide).unwrap();
     let start_time = Instant::now();
     for y in 0..args.height {
         for x in 0..args.width {
+            if exit_flag.as_ref().load(Ordering::Relaxed) {
+                panic!("Interupt received");
+            }
             let ray: Ray = Ray {
                 o: uv::Vec3::new(5.0, 2.0, 0.0),
                 d: uv::Vec3::new(
@@ -1111,7 +1062,7 @@ fn main() {
     }
     let duration = start_time.elapsed().as_secs_f32();
     stdout.execute(cursor::Show).unwrap();
-    print!("\rRendered in {duration:0.2}s");
-
+    println!("Rendered in {duration:0.2}s");
     img_buf.save(output_path).unwrap();
+    println!("Output written to \"{}\"", output_path.to_str().unwrap());
 }
