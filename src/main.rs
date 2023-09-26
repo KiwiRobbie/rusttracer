@@ -1,3 +1,5 @@
+#![feature(iter_collect_into)]
+
 use clap::Parser;
 use crossterm::{cursor, terminal, ExecutableCommand, QueueableCommand};
 use fastrand;
@@ -8,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use ultraviolet as uv;
-use uv::Lerp;
+use uv::{f32x8, Lerp, Vec3x8};
 
 use std::time::{Duration, Instant};
 use uv::Vec3;
@@ -28,29 +30,29 @@ struct Ray {
 }
 
 struct Ray8 {
-    origin: uv::Vec3x8,
-    direction: uv::Vec3x8,
+    origin: Vec3x8,
+    direction: Vec3x8,
 }
 
 impl Ray8 {
     fn splat(ray: &Ray) -> Ray8 {
         Ray8 {
-            origin: uv::Vec3x8::splat(ray.origin),
-            direction: uv::Vec3x8::splat(ray.direction),
+            origin: Vec3x8::splat(ray.origin),
+            direction: Vec3x8::splat(ray.direction),
         }
     }
 }
 
 struct RayInverse8 {
-    origin: uv::Vec3x8,
-    inverse_direction: uv::Vec3x8,
+    origin: Vec3x8,
+    inverse_direction: Vec3x8,
 }
 
 impl RayInverse8 {
     fn splat(ray: &Ray) -> RayInverse8 {
         RayInverse8 {
-            origin: uv::Vec3x8::splat(ray.origin),
-            inverse_direction: uv::Vec3x8::splat(uv::Vec3::new(
+            origin: Vec3x8::splat(ray.origin),
+            inverse_direction: Vec3x8::splat(uv::Vec3::new(
                 1.0 / ray.direction.x,
                 1.0 / ray.direction.y,
                 1.0 / ray.direction.z,
@@ -66,10 +68,12 @@ struct Tri {
     n: uv::Vec3,
 }
 struct Trix8 {
-    p0: uv::Vec3x8,
-    p1: uv::Vec3x8,
-    p2: uv::Vec3x8,
-    n: [uv::Vec3; 8],
+    p0: Vec3x8,
+    p1: Vec3x8,
+    p2: Vec3x8,
+    n0: [Vec3; 8],
+    n1: [Vec3; 8],
+    n2: [Vec3; 8],
 }
 
 struct Sphere {
@@ -83,7 +87,7 @@ struct Plane {
 }
 
 type Aabb = (uv::Vec3, uv::Vec3);
-type Aabb8 = (uv::Vec3x8, uv::Vec3x8);
+type Aabb8 = (Vec3x8, Vec3x8);
 
 // Render Objects
 trait Hittable {
@@ -245,7 +249,49 @@ impl Hittable for TriClusterRenderObject {
         }
 
         let pos = ray.origin + ray.direction * t;
-        let norm: uv::Vec3 = self.tris.n[i];
+        // let norm: uv::Vec3 = self.tris.n[i];
+
+        let norm = {
+            let Trix8 {
+                p0,
+                p1,
+                p2,
+                n0,
+                n1,
+                n2,
+            } = self.tris;
+
+            let (a, b, c, n0, n1, n2) = (
+                Into::<[Vec3; 8]>::into(p0)[i],
+                Into::<[Vec3; 8]>::into(p1)[i],
+                Into::<[Vec3; 8]>::into(p2)[i],
+                n0[i],
+                n1[i],
+                n2[i],
+            );
+            let p = pos;
+            let v0 = b - a;
+            let v1 = c - a;
+            let v2 = p - a;
+
+            let d00: f32 = v0.dot(v0);
+            let d01: f32 = v0.dot(v1);
+            let d11: f32 = v1.dot(v1);
+            let d20: f32 = v2.dot(v0);
+            let d21: f32 = v2.dot(v1);
+            let denom: f32 = d00 * d11 - d01 * d01;
+
+            // Degenerate triangle?
+            if denom == 0.0 {
+                return None;
+            }
+
+            let v = (d11 * d20 - d01 * d21) / denom;
+            let w = (d00 * d21 - d01 * d20) / denom;
+            let u = 1.0f32 - v - w;
+            n0 * u + n1 * v + n2 * w
+        }
+        .normalized();
 
         Some(Hit {
             t,
@@ -253,6 +299,13 @@ impl Hittable for TriClusterRenderObject {
             norm,
             mat: &*self.mat,
         })
+
+        // if !hit.norm.x.is_finite() || !hit.norm.y.is_finite() || !hit.norm.z.is_finite() {
+        //     dbg!(hit.norm);
+        //     None
+        // } else {
+        //     Some(hit)
+        // }
     }
 
     fn bounding_volume(&self) -> Aabb {
@@ -691,7 +744,7 @@ impl Material for Emmisive {
     }
 }
 
-fn aabb_hit_8(r: &RayInverse8, min: uv::Vec3x8, max: uv::Vec3x8) -> uv::f32x8 {
+fn aabb_hit_8(r: &RayInverse8, min: Vec3x8, max: Vec3x8) -> uv::f32x8 {
     let t1 = (min.x - r.origin.x) * r.inverse_direction.x;
     let t2 = (max.x - r.origin.x) * r.inverse_direction.x;
     let t3 = (min.y - r.origin.y) * r.inverse_direction.y;
@@ -794,7 +847,7 @@ fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
 fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
     let epsilon_x8: uv::f32x8 = uv::f32x8::splat(EPSILON);
     let ray: Ray8 = Ray8::splat(ray_single);
-    let (edge1, edge2, h, s, q): (uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8);
+    let (edge1, edge2, h, s, q): (Vec3x8, Vec3x8, Vec3x8, Vec3x8, Vec3x8);
     let (a, f, u, v): (uv::f32x8, uv::f32x8, uv::f32x8, uv::f32x8);
     edge1 = tri.p1 - tri.p0;
     edge2 = tri.p2 - tri.p0;
@@ -823,6 +876,10 @@ fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
     invalid.blend(uv::f32x8::splat(f32::MAX), t)
 }
 
+fn check_finite(v: Vec3) -> bool {
+    v.x.is_finite() && v.z.is_finite() && v.y.is_finite()
+}
+
 fn model_loader(model_string: &str) -> Vec<Trix8> {
     println!("\nLoading model \"{model_string}\"");
     // Create a path to the file // sponza_simple
@@ -837,9 +894,11 @@ fn model_loader(model_string: &str) -> Vec<Trix8> {
 
     let reader = BufReader::new(file);
 
-    let mut faces: Vec<(u32, u32, u32)> = Vec::new();
+    let mut face_verts: Vec<(usize, usize, usize)> = Vec::new();
+    let mut face_normals: Vec<(usize, usize, usize)> = Vec::new();
     let mut verts: Vec<uv::Vec3> = Vec::new();
-    let mut faces_on_vert: Vec<Vec<u32>> = Vec::new();
+    let mut vert_normals: Vec<uv::Vec3> = Vec::new();
+    let mut faces_on_vert: Vec<Vec<usize>> = Vec::new();
 
     for line in reader.lines() {
         let line = line.unwrap();
@@ -857,17 +916,48 @@ fn model_loader(model_string: &str) -> Vec<Trix8> {
 
                 faces_on_vert.push(Vec::new());
             }
+            Some("vn") => {
+                vert_normals.push(uv::Vec3::new(
+                    line_iter.next().unwrap().parse::<f32>().unwrap(),
+                    line_iter.next().unwrap().parse::<f32>().unwrap(),
+                    line_iter.next().unwrap().parse::<f32>().unwrap(),
+                ));
+            }
+
             Some("f") => {
-                let attached_verts = (
-                    line_iter.next().unwrap().parse::<u32>().unwrap() - 1,
-                    line_iter.next().unwrap().parse::<u32>().unwrap() - 1,
-                    line_iter.next().unwrap().parse::<u32>().unwrap() - 1,
-                );
-                let i = faces.len() as u32;
-                faces_on_vert[attached_verts.0 as usize].push(i);
-                faces_on_vert[attached_verts.1 as usize].push(i);
-                faces_on_vert[attached_verts.2 as usize].push(i);
-                faces.push(attached_verts);
+                let lines = [
+                    line_iter.next().unwrap(),
+                    line_iter.next().unwrap(),
+                    line_iter.next().unwrap(),
+                ];
+
+                if let [Some((v0, n0)), Some((v1, n1)), Some((v2, n2))] =
+                    lines.map(|line| line.split_once("//"))
+                {
+                    let i = face_verts.len();
+                    let verts = (
+                        v0.parse::<usize>().unwrap() - 1,
+                        v1.parse::<usize>().unwrap() - 1,
+                        v2.parse::<usize>().unwrap() - 1,
+                    );
+                    let norms = (
+                        n0.parse::<usize>().unwrap() - 1,
+                        n1.parse::<usize>().unwrap() - 1,
+                        n2.parse::<usize>().unwrap() - 1,
+                    );
+                    faces_on_vert[verts.0].push(i);
+                    faces_on_vert[verts.1].push(i);
+                    faces_on_vert[verts.2].push(i);
+                    face_verts.push(verts);
+                    face_normals.push(norms);
+                } else {
+                    let [v0, v1, v2] = lines.map(|line| line.parse::<usize>().unwrap() - 1);
+                    let i = face_verts.len();
+                    faces_on_vert[v0].push(i);
+                    faces_on_vert[v1].push(i);
+                    faces_on_vert[v2].push(i);
+                    face_verts.push((v0, v1, v2));
+                }
             }
             Some(&_) => {}
             None => {}
@@ -875,12 +965,12 @@ fn model_loader(model_string: &str) -> Vec<Trix8> {
     }
 
     println!("\tCreating triangle clusters");
-    let mut remaining_faces: HashSet<u32> = (0..faces.len() as u32).collect();
-    let mut clusters: Vec<Vec<u32>> = Vec::new();
+    let mut remaining_faces: HashSet<usize> = (0..face_verts.len()).collect();
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
     while remaining_faces.len() > 0 {
-        let mut i: u32 = 0;
+        let mut i: usize = 0;
 
-        let mut cluster: Vec<u32> = vec![remaining_faces
+        let mut cluster: Vec<usize> = vec![remaining_faces
             .take(&remaining_faces.iter().next().cloned().unwrap())
             .unwrap()];
 
@@ -888,16 +978,16 @@ fn model_loader(model_string: &str) -> Vec<Trix8> {
 
         'cluster_loop: while cluster.len() < 8 {
             while connected_faces.len() == 0 {
-                if i == cluster.len() as u32 {
+                if i == cluster.len() {
                     break 'cluster_loop;
                 }
-                let face_verts = faces[cluster[i as usize] as usize];
-                connected_faces.append(&mut faces_on_vert[face_verts.0 as usize].clone());
-                connected_faces.append(&mut faces_on_vert[face_verts.1 as usize].clone());
-                connected_faces.append(&mut faces_on_vert[face_verts.2 as usize].clone());
+                let face_verts = face_verts[cluster[i]];
+                connected_faces.append(&mut faces_on_vert[face_verts.0].clone());
+                connected_faces.append(&mut faces_on_vert[face_verts.1].clone());
+                connected_faces.append(&mut faces_on_vert[face_verts.2].clone());
                 i += 1;
             }
-            let face: u32 = connected_faces.pop().unwrap();
+            let face: usize = connected_faces.pop().unwrap();
             if connected_faces.contains(&face) || !remaining_faces.contains(&face) {
                 continue;
             }
@@ -916,20 +1006,44 @@ fn model_loader(model_string: &str) -> Vec<Trix8> {
         let mut p0: [uv::Vec3; 8] = [nan3; 8];
         let mut p1: [uv::Vec3; 8] = [nan3; 8];
         let mut p2: [uv::Vec3; 8] = [nan3; 8];
-        let mut n: [uv::Vec3; 8] = [nan3; 8];
+        let mut n0: [uv::Vec3; 8] = [nan3; 8];
+        let mut n1: [uv::Vec3; 8] = [nan3; 8];
+        let mut n2: [uv::Vec3; 8] = [nan3; 8];
         for (i, v) in cluster.iter().enumerate() {
-            let face = faces[*v as usize];
+            let face_verts = face_verts[*v];
             let offset = uv::Vec3::new(0.0, 0.0, -0.0);
-            p0[i] = verts[face.0 as usize] + offset;
-            p1[i] = verts[face.1 as usize] + offset;
-            p2[i] = verts[face.2 as usize] + offset;
-            n[i] = (p1[i] - p0[i]).cross(p2[i] - p0[i]).normalized();
+            p0[i] = verts[face_verts.0 as usize] + offset;
+            p1[i] = verts[face_verts.1 as usize] + offset;
+            p2[i] = verts[face_verts.2 as usize] + offset;
+
+            if !vert_normals.is_empty() {
+                let face_normals = face_normals[*v];
+                n0[i] = vert_normals[face_normals.0 as usize].normalized();
+                n1[i] = vert_normals[face_normals.1 as usize].normalized();
+                n2[i] = vert_normals[face_normals.2 as usize].normalized();
+
+                if !check_finite(n0[i]) {
+                    n0[i] = (p1[i] - p0[i]).cross(p2[i] - p0[i]).normalized();
+                }
+                if !check_finite(n1[i]) {
+                    n1[i] = (p1[i] - p0[i]).cross(p2[i] - p0[i]).normalized();
+                }
+                if !check_finite(n2[i]) {
+                    n2[i] = (p1[i] - p0[i]).cross(p2[i] - p0[i]).normalized();
+                }
+            } else {
+                n0[i] = (p1[i] - p0[i]).cross(p2[i] - p0[i]).normalized();
+                n1[i] = (p1[i] - p0[i]).cross(p2[i] - p0[i]).normalized();
+                n2[i] = (p1[i] - p0[i]).cross(p2[i] - p0[i]).normalized();
+            }
         }
         let packed_cluster = Trix8 {
-            p0: uv::Vec3x8::from(p0),
-            p1: uv::Vec3x8::from(p1),
-            p2: uv::Vec3x8::from(p2),
-            n,
+            p0: p0.into(),
+            p1: p1.into(),
+            p2: p2.into(),
+            n0,
+            n1,
+            n2,
         };
         triangle_clusters.push(packed_cluster);
     }
@@ -971,7 +1085,7 @@ struct CliArguments {
     #[clap(short = 'w', long, default_value = "512")]
     width: usize,
 
-    #[clap(short = 'h', long, default_value = "512")]
+    #[clap(short = 'k', long, default_value = "512")]
     height: usize,
 
     #[clap(short = 's', long, default_value = "32")]
@@ -1054,12 +1168,40 @@ impl RenderImage {
         let tile_width = (pixel_x + self.tile_size).min(self.width) - pixel_x;
         let tile_height = (pixel_y + self.tile_size).min(self.height) - pixel_y;
 
-        Some(RenderTile {
+        let tile = RenderTile {
             pixel_x,
             pixel_y,
             pixel_width: tile_width,
             pixel_height: tile_height,
-        })
+        };
+
+        {
+            let mut buffer = self.buffer.lock().unwrap();
+            let mut flat = buffer.as_flat_samples_mut();
+            let slice = flat.as_mut_slice();
+            for (target_y) in tile.y_range() {
+                let target_start = 3 * (target_y * self.width + tile.pixel_x);
+                let target_end = 3 * (target_y * self.width + tile.pixel_x + tile.pixel_width - 1);
+
+                slice[target_start] = 255;
+                slice[target_end] = 255;
+            }
+
+            for pixel in (tile.pixel_y * self.width + tile.pixel_x)
+                ..(tile.pixel_y * self.width + tile.pixel_x + tile.pixel_width)
+            {
+                slice[3 * pixel] = 255;
+            }
+            for pixel in ((tile.pixel_y + tile.pixel_height - 1) * self.width + tile.pixel_x)
+                ..((tile.pixel_y + tile.pixel_height - 1) * self.width
+                    + tile.pixel_x
+                    + tile.pixel_width)
+            {
+                slice[3 * pixel] = 255;
+            }
+        }
+
+        Some(tile)
     }
 
     fn write_tile(&mut self, tile: RenderTile, data: &[u8]) {
@@ -1123,9 +1265,10 @@ fn spaww_render_thread(
                         col += trace_ray(&ray, render_object.as_ref(), 4)
                             / (render_image.samples as f32);
                     }
-                    tile_buffer[tile_pixel_index + 0] = (col.x * 255.0) as u8;
-                    tile_buffer[tile_pixel_index + 1] = (col.y * 255.0) as u8;
-                    tile_buffer[tile_pixel_index + 2] = (col.z * 255.0) as u8;
+
+                    tile_buffer[tile_pixel_index + 0] = (col.x.clamp(0.0, 1.0) * 255.0) as u8;
+                    tile_buffer[tile_pixel_index + 1] = (col.y.clamp(0.0, 1.0) * 255.0) as u8;
+                    tile_buffer[tile_pixel_index + 2] = (col.z.clamp(0.0, 1.0) * 255.0) as u8;
                     tile_pixel_index += 3;
                 }
             }
@@ -1157,19 +1300,19 @@ fn main() {
         },
         mat: Arc::new(Diffuse {
             col: uv::Vec3::new(1.0, 1.0, 1.0),
-            roughness: 1.0,
+            roughness: 0.5,
         }),
     };
 
     let teapot_tris = model_loader("models/teapot.obj");
-    let sponza_tris = model_loader("models/sponza_simple.obj");
+    let sponza_tris = model_loader("models/sponza_normals.obj");
 
     let mut scene_model: Vec<Box<dyn Hittable + Send + Sync>> =
         Vec::with_capacity(sponza_tris.len() + teapot_tris.len());
 
     let sponza_mat: Arc<dyn Material + Send + Sync> = Arc::new(Glossy {
         col: uv::Vec3::new(0.7, 0.7, 0.7),
-        roughness: 0.2,
+        roughness: 0.25,
     });
 
     for tri_cluster in teapot_tris.into_iter() {
@@ -1187,7 +1330,9 @@ fn main() {
                 p0: tri_cluster.p0 / uv::f32x8::splat(2.0),
                 p1: tri_cluster.p1 / uv::f32x8::splat(2.0),
                 p2: tri_cluster.p2 / uv::f32x8::splat(2.0),
-                n: tri_cluster.n,
+                n0: tri_cluster.n0,
+                n1: tri_cluster.n1,
+                n2: tri_cluster.n2,
             },
             mat: Arc::new(Emmisive { col: 2.0 * col }), //mat: Rc::clone(&tea_pot_mat)
         }));
