@@ -1,8 +1,4 @@
-#![feature(test)]
-#![feature(slice_pattern)]
-
 use clap::Parser;
-use core::slice::SlicePattern;
 use crossterm::{cursor, terminal, ExecutableCommand, QueueableCommand};
 use fastrand;
 use image::{ImageBuffer, Rgb};
@@ -14,8 +10,6 @@ use std::thread;
 use ultraviolet as uv;
 use uv::Lerp;
 
-extern crate test;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 use uv::Vec3;
 
@@ -29,36 +23,38 @@ use std::path::Path;
 const EPSILON: f32 = 0.00001;
 
 struct Ray {
-    o: uv::Vec3,
-    d: uv::Vec3,
+    origin: uv::Vec3,
+    direction: uv::Vec3,
 }
 
-struct Rayx8 {
-    o: uv::Vec3x8,
-    d: uv::Vec3x8,
+struct Ray8 {
+    origin: uv::Vec3x8,
+    direction: uv::Vec3x8,
 }
 
-impl Rayx8 {
-    fn splat(ray: &Ray) -> Rayx8 {
-        Rayx8 {
-            o: uv::Vec3x8::splat(ray.o),
-            d: uv::Vec3x8::splat(ray.d),
+impl Ray8 {
+    fn splat(ray: &Ray) -> Ray8 {
+        Ray8 {
+            origin: uv::Vec3x8::splat(ray.origin),
+            direction: uv::Vec3x8::splat(ray.direction),
         }
     }
 }
 
-struct RayCx8 {
-    o: uv::Vec3x8,
-    d: uv::Vec3x8,
-    i: uv::Vec3x8,
+struct RayInverse8 {
+    origin: uv::Vec3x8,
+    inverse_direction: uv::Vec3x8,
 }
 
-impl RayCx8 {
-    fn splat(ray: &Ray) -> RayCx8 {
-        RayCx8 {
-            o: uv::Vec3x8::splat(ray.o),
-            d: uv::Vec3x8::splat(ray.d),
-            i: uv::Vec3x8::splat(uv::Vec3::new(1.0 / ray.d.x, 1.0 / ray.d.y, 1.0 / ray.d.z)),
+impl RayInverse8 {
+    fn splat(ray: &Ray) -> RayInverse8 {
+        RayInverse8 {
+            origin: uv::Vec3x8::splat(ray.origin),
+            inverse_direction: uv::Vec3x8::splat(uv::Vec3::new(
+                1.0 / ray.direction.x,
+                1.0 / ray.direction.y,
+                1.0 / ray.direction.z,
+            )),
         }
     }
 }
@@ -77,17 +73,17 @@ struct Trix8 {
 }
 
 struct Sphere {
-    o: uv::Vec3,
-    r_sq: f32,
+    origin: uv::Vec3,
+    radius_squared: f32,
 }
 
 struct Plane {
-    o: uv::Vec3,
-    n: uv::Vec3,
+    origin: uv::Vec3,
+    normal: uv::Vec3,
 }
 
 type Aabb = (uv::Vec3, uv::Vec3);
-type Aabbx8 = (uv::Vec3x8, uv::Vec3x8);
+type Aabb8 = (uv::Vec3x8, uv::Vec3x8);
 
 // Render Objects
 trait Hittable {
@@ -120,16 +116,16 @@ struct PlaneRenderObject {
 
 impl PlaneRenderObject {
     fn normal(&self, _pos: uv::Vec3) -> uv::Vec3 {
-        self.plane.n
+        self.plane.normal
     }
 }
 
 impl Hittable for PlaneRenderObject {
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
-        let div: f32 = ray.d.dot(self.plane.n);
-        let t = (self.plane.o - ray.o).dot(self.plane.n) / div;
+        let div: f32 = ray.direction.dot(self.plane.normal);
+        let t = (self.plane.origin - ray.origin).dot(self.plane.normal) / div;
         if t > 0.0 {
-            let pos = ray.o + ray.d * t;
+            let pos = ray.origin + ray.direction * t;
 
             return Some(Hit {
                 t,
@@ -151,9 +147,9 @@ struct SphereRenderObject {
 }
 impl SphereRenderObject {
     fn ray_sphere_intersect(&self, ray: &Ray) -> f32 {
-        let oc = ray.o - self.sphere.o;
-        let b = oc.dot(ray.d);
-        let c = oc.mag_sq() - self.sphere.r_sq;
+        let oc = ray.origin - self.sphere.origin;
+        let b = oc.dot(ray.direction);
+        let c = oc.mag_sq() - self.sphere.radius_squared;
         let descrim = b * b - c;
 
         if descrim > 0.0 {
@@ -176,7 +172,7 @@ impl SphereRenderObject {
     }
 
     fn normal(&self, pos: uv::Vec3) -> uv::Vec3 {
-        (pos - self.sphere.o).normalized()
+        (pos - self.sphere.origin).normalized()
     }
 }
 
@@ -188,7 +184,7 @@ impl Hittable for SphereRenderObject {
             return None;
         }
 
-        let pos: uv::Vec3 = ray.o + ray.d * t;
+        let pos: uv::Vec3 = ray.origin + ray.direction * t;
         let norm: uv::Vec3 = self.normal(pos);
 
         Some(Hit {
@@ -214,7 +210,7 @@ impl Hittable for TriRenderObject {
         if t == f32::MAX {
             return None;
         }
-        let pos = ray.o + ray.d * t;
+        let pos = ray.origin + ray.direction * t;
         let norm = self.tri.n;
 
         Some(Hit {
@@ -248,7 +244,7 @@ impl Hittable for TriClusterRenderObject {
             return None;
         }
 
-        let pos = ray.o + ray.d * t;
+        let pos = ray.origin + ray.direction * t;
         let norm: uv::Vec3 = self.tris.n[i];
 
         Some(Hit {
@@ -314,7 +310,7 @@ impl Hittable for RenderObjectList {
 struct BvhNodeBuilder {
     bound: Option<Aabb>,
     subnodes: Option<Vec<usize>>,
-    subnode_bounds: Option<Aabbx8>,
+    subnode_bounds: Option<Aabb8>,
     leaf: Option<usize>,
 }
 
@@ -328,7 +324,7 @@ enum BvhNodeIndex {
 #[derive(Clone)]
 struct BvhNode {
     subnodes: [BvhNodeIndex; 8],
-    subnode_bounds: Aabbx8,
+    subnode_bounds: Aabb8,
 }
 
 struct RenderObjectBvhBuilder {
@@ -568,13 +564,13 @@ impl RenderObjectBvhBuilder {
 
 impl Hittable for RenderObjectBVH {
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
-        let ray_c = RayCx8::splat(ray);
+        let ray_c = RayInverse8::splat(ray);
 
         let mut bvh_tests: Vec<usize> = vec![0];
         let mut final_tests: Vec<usize> = vec![];
 
-        while bvh_tests.len() > 0 {
-            let node = &self.nodes[bvh_tests.pop().unwrap()];
+        while let Some(test) = bvh_tests.pop() {
+            let node = &self.nodes[test];
             let hit_data: [f32; 8] =
                 aabb_hit_8(&ray_c, node.subnode_bounds.0, node.subnode_bounds.1).into();
 
@@ -638,7 +634,7 @@ impl Default for Diffuse {
     fn default() -> Self {
         Diffuse {
             col: uv::Vec3::new(0.0, 0.0, 0.0),
-            roughness: 0.0,
+            roughness: 1.0,
         }
     }
 }
@@ -646,8 +642,10 @@ impl Default for Diffuse {
 impl Material for Glossy {
     fn scatter(&self, ray: &Ray, hit: &Hit) -> Option<Ray> {
         Some(Ray {
-            o: hit.pos + hit.norm * EPSILON,
-            d: ray.d - 2.0 * (ray.d.dot(hit.norm)) * hit.norm,
+            origin: hit.pos + hit.norm * EPSILON,
+            direction: (ray.direction - 2.0 * (ray.direction.dot(hit.norm)) * hit.norm
+                + self.roughness * random_sphere().normalized())
+            .normalized(),
         })
     }
     fn sample(&self, _ray: &Ray, _hit: &Hit) -> uv::Vec3 {
@@ -658,25 +656,28 @@ impl Material for Glossy {
 impl Material for Diffuse {
     fn scatter(&self, _ray: &Ray, hit: &Hit) -> Option<Ray> {
         // Get random unit vector on sphere surface
-        let mut random_unit: uv::Vec3;
-        loop {
-            let x = 2.0 * fastrand::f32() - 1.0;
-            let y = 2.0 * fastrand::f32() - 1.0;
-            let z = 2.0 * fastrand::f32() - 1.0;
-            random_unit = uv::Vec3::new(x, y, z);
-            if random_unit.mag_sq() <= 1.0 {
-                break;
-            }
-        }
 
         Some(Ray {
-            o: hit.pos + hit.norm * EPSILON,
-            d: (hit.norm * (1.0 + EPSILON) + random_unit.normalized()).normalized(),
+            origin: hit.pos + hit.norm * EPSILON,
+            direction: (hit.norm * (1.0 + EPSILON) + random_sphere().normalized() * self.roughness)
+                .normalized(),
         })
     }
 
     fn sample(&self, _ray: &Ray, _hit: &Hit) -> uv::Vec3 {
         self.col
+    }
+}
+
+fn random_sphere() -> Vec3 {
+    loop {
+        let x = 2.0 * fastrand::f32() - 1.0;
+        let y = 2.0 * fastrand::f32() - 1.0;
+        let z = 2.0 * fastrand::f32() - 1.0;
+        let random_unit = uv::Vec3::new(x, y, z);
+        if random_unit.mag_sq() <= 1.0 {
+            return random_unit;
+        }
     }
 }
 
@@ -689,13 +690,13 @@ impl Material for Emmisive {
     }
 }
 
-fn aabb_hit_8(r: &RayCx8, min: uv::Vec3x8, max: uv::Vec3x8) -> uv::f32x8 {
-    let t1 = (min.x - r.o.x) * r.i.x;
-    let t2 = (max.x - r.o.x) * r.i.x;
-    let t3 = (min.y - r.o.y) * r.i.y;
-    let t4 = (max.y - r.o.y) * r.i.y;
-    let t5 = (min.z - r.o.z) * r.i.z;
-    let t6 = (max.z - r.o.z) * r.i.z;
+fn aabb_hit_8(r: &RayInverse8, min: uv::Vec3x8, max: uv::Vec3x8) -> uv::f32x8 {
+    let t1 = (min.x - r.origin.x) * r.inverse_direction.x;
+    let t2 = (max.x - r.origin.x) * r.inverse_direction.x;
+    let t3 = (min.y - r.origin.y) * r.inverse_direction.y;
+    let t4 = (max.y - r.origin.y) * r.inverse_direction.y;
+    let t5 = (min.z - r.origin.z) * r.inverse_direction.z;
+    let t6 = (max.z - r.origin.z) * r.inverse_direction.z;
 
     let tmin = uv::f32x8::max(
         uv::f32x8::max(uv::f32x8::min(t1, t2), uv::f32x8::min(t3, t4)),
@@ -718,9 +719,9 @@ fn sample_sky(ray: &Ray) -> uv::Vec3 {
     let sun_dir = uv::Vec3::new(0.5, 1.0, 1.0).normalized();
 
     let sky_sample = horizon
-        .lerp(apex, ray.d.y.clamp(0.0, 1.0))
-        .lerp(ground, (-5.0 * ray.d.y).clamp(0.0, 1.0).powf(0.5));
-    let sun_sample = if ray.d.dot(sun_dir) < 0.9 {
+        .lerp(apex, ray.direction.y.clamp(0.0, 1.0))
+        .lerp(ground, (-5.0 * ray.direction.y).clamp(0.0, 1.0).powf(0.5));
+    let sun_sample = if ray.direction.dot(sun_dir) < 0.9 {
         uv::Vec3::new(0.0, 0.0, 0.0)
     } else {
         sun
@@ -731,7 +732,10 @@ fn sample_sky(ray: &Ray) -> uv::Vec3 {
 
 fn trace_ray(ray: &Ray, scene: &dyn Hittable, depth: i32) -> uv::Vec3 {
     let mut col = uv::Vec3::new(1.0, 1.0, 1.0);
-    let mut working_ray: Ray = Ray { o: ray.o, d: ray.d };
+    let mut working_ray: Ray = Ray {
+        origin: ray.origin,
+        direction: ray.direction,
+    };
 
     for _ in 0..depth {
         let hit: Option<Hit> = scene.ray_test(&working_ray);
@@ -757,7 +761,7 @@ fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
     let (a, f, u, v): (f32, f32, f32, f32);
     edge1 = tri.p1 - tri.p0;
     edge2 = tri.p2 - tri.p0;
-    h = ray.d.cross(edge2);
+    h = ray.direction.cross(edge2);
     a = edge1.dot(h);
     if a > -EPSILON && a < EPSILON {
         // This ray is parallel to this triangle.
@@ -765,14 +769,14 @@ fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
     }
 
     f = 1.0 / a;
-    s = ray.o - tri.p0;
+    s = ray.origin - tri.p0;
     u = f * s.dot(h);
     if u < 0.0 || u > 1.0 {
         return f32::MAX;
     }
 
     q = s.cross(edge1);
-    v = f * ray.d.dot(q);
+    v = f * ray.direction.dot(q);
     if v < 0.0 || u + v > 1.0 {
         return f32::MAX;
     }
@@ -788,24 +792,24 @@ fn tri_intersect(tri: &Tri, ray: &Ray) -> f32 {
 
 fn tri_intersect_8(tri: &Trix8, ray_single: &Ray) -> uv::f32x8 {
     let epsilon_x8: uv::f32x8 = uv::f32x8::splat(EPSILON);
-    let ray: Rayx8 = Rayx8::splat(ray_single);
+    let ray: Ray8 = Ray8::splat(ray_single);
     let (edge1, edge2, h, s, q): (uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8, uv::Vec3x8);
     let (a, f, u, v): (uv::f32x8, uv::f32x8, uv::f32x8, uv::f32x8);
     edge1 = tri.p1 - tri.p0;
     edge2 = tri.p2 - tri.p0;
-    h = ray.d.cross(edge2);
+    h = ray.direction.cross(edge2);
     a = edge1.dot(h);
 
     let invalid = a.cmp_gt(-epsilon_x8) & a.cmp_lt(epsilon_x8);
 
     f = uv::f32x8::ONE / a;
-    s = ray.o - tri.p0;
+    s = ray.origin - tri.p0;
     u = f * s.dot(h);
 
     let invalid = invalid | u.cmp_lt(uv::f32x8::ZERO) | u.cmp_gt(uv::f32x8::ONE);
 
     q = s.cross(edge1);
-    v = f * ray.d.dot(q);
+    v = f * ray.direction.dot(q);
 
     let invalid = invalid | v.cmp_lt(uv::f32x8::ZERO) | (u + v).cmp_gt(uv::f32x8::ONE);
 
@@ -903,7 +907,7 @@ fn model_loader(model_string: &str) -> Vec<Trix8> {
     }
     println!("\tPacking cluster data");
     let mut triangle_clusters: Vec<Trix8> = Vec::new();
-    for (n, cluster) in clusters.iter().enumerate() {
+    for cluster in clusters.iter() {
         let nan: [f32; 8] = uv::f32x8::splat(0.0).cmp_eq(uv::f32x8::splat(0.0)).into();
         let nan = nan[0];
 
@@ -958,7 +962,10 @@ fn model_loader(model_string: &str) -> Vec<Trix8> {
 }
 
 #[derive(Parser, Debug)]
-#[clap(author = "Robert Chrisite", about = "Simple raytracer written in rust")]
+#[clap(
+    author = "Robert Chrisite",
+    about = "Simple multithreaded SIMD raytracer written in rust"
+)]
 struct CliArguments {
     #[clap(short = 'w', long, default_value = "512")]
     width: usize,
@@ -972,15 +979,19 @@ struct CliArguments {
     #[clap(short = 'o', long, default_value = "render.png")]
     output: String,
 
-    #[clap(short = 'd', long)]
-    dump_bvh: Option<String>,
+    #[clap(short = 't', long, default_value = "16")]
+    tile_size: usize,
 
-    #[clap(short = 't', long)]
+    #[clap(long, action)]
+    incremetal: bool,
+
+    #[clap(long)]
     threads: Option<usize>,
+
+    #[clap(long)]
+    dump_bvh: Option<String>,
 }
 struct RenderTile {
-    x: usize,
-    y: usize,
     pixel_x: usize,
     pixel_y: usize,
     pixel_width: usize,
@@ -1043,8 +1054,6 @@ impl RenderImage {
         let tile_height = (pixel_y + self.tile_size).min(self.height) - pixel_y;
 
         Some(RenderTile {
-            x: tile_x,
-            y: tile_y,
             pixel_x,
             pixel_y,
             pixel_width: tile_width,
@@ -1102,8 +1111,8 @@ fn spaww_render_thread(
                         let jitter_u = (fastrand::f32() - 0.5) * du;
                         let jitter_v = (fastrand::f32() - 0.5) * dv;
                         let ray: Ray = Ray {
-                            o: uv::Vec3::new(5.0, 2.0, 0.0),
-                            d: uv::Vec3::new(
+                            origin: uv::Vec3::new(5.0, 2.0, 0.0),
+                            direction: uv::Vec3::new(
                                 -1.0,
                                 u + jitter_u,
                                 (v + jitter_v) * render_image.aspect_ratio,
@@ -1142,8 +1151,8 @@ fn main() {
     // Scene creation
     let test_floor = PlaneRenderObject {
         plane: Plane {
-            o: uv::Vec3::new(0.0, 0.0, 0.0),
-            n: uv::Vec3::new(0.0, 1.0, 0.0),
+            origin: uv::Vec3::new(0.0, 0.0, 0.0),
+            normal: uv::Vec3::new(0.0, 1.0, 0.0),
         },
         mat: Arc::new(Diffuse {
             col: uv::Vec3::new(1.0, 1.0, 1.0),
@@ -1157,9 +1166,9 @@ fn main() {
     let mut scene_model: Vec<Box<dyn Hittable + Send + Sync>> =
         Vec::with_capacity(sponza_tris.len() + teapot_tris.len());
 
-    let sponza_mat: Arc<dyn Material + Send + Sync> = Arc::new(Diffuse {
+    let sponza_mat: Arc<dyn Material + Send + Sync> = Arc::new(Glossy {
         col: uv::Vec3::new(0.7, 0.7, 0.7),
-        roughness: 1.0,
+        roughness: 0.2,
     });
 
     for tri_cluster in teapot_tris.into_iter() {
@@ -1206,7 +1215,6 @@ fn main() {
     };
 
     let render_object = Arc::new(root_render_object);
-    let render_image = RenderImage::new(args.width, args.height, 128, args.samples);
 
     let mut stdout = stdout();
     stdout.execute(cursor::Hide).unwrap();
@@ -1219,7 +1227,15 @@ fn main() {
             .unwrap_or(1),
     );
 
-    println!("\nStarting render with {num_threads} threads");
+    let tile_size = args.tile_size;
+    let render_image = RenderImage::new(args.width, args.height, tile_size, args.samples);
+
+    println!("\nStarting render");
+    println!("\tImage size: {}x{}", args.width, args.height);
+    println!("\tSamples:    {}", args.samples);
+    println!("\tThreads:    {}", num_threads);
+    println!();
+
     let mut threads = (0..num_threads)
         .map(|_| {
             spaww_render_thread(
@@ -1230,18 +1246,27 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    while let Some(thread) = threads.last() {
-        if thread.is_finished() {
-            threads.pop().unwrap().join().unwrap();
+    let mut counter: usize = 0;
+    let mut done = false;
+    let total_tiles = render_image.tile_count();
+
+    loop {
+        if let Some(thread) = threads.last() {
+            if thread.is_finished() {
+                threads.pop().unwrap().join().unwrap();
+                continue;
+            }
+        } else {
+            done = true;
         }
         let completed_tiles = render_image.finished_tiles.load(Ordering::Relaxed);
-        let total_tiles = render_image.tile_count();
 
         let elapsed = start_time.elapsed().as_secs_f32();
         let total = (elapsed / completed_tiles as f32) * total_tiles as f32;
 
         let term_width = terminal::size().map(|(w, _)| w).unwrap_or(32) as usize;
-        let msg_time = format!("Rendering: {elapsed:0.2}s / {total:0.2}s");
+        let msg_time =
+            format!("{completed_tiles}/{total_tiles} Tiles in {elapsed:0.2}s / {total:0.2}s");
         let progress_width = (term_width - msg_time.len() - 3).max(8);
         let render_progress =
             (progress_width as f32 * completed_tiles as f32 / total_tiles as f32).ceil() as usize;
@@ -1251,6 +1276,9 @@ fn main() {
             .collect::<String>();
 
         stdout.queue(cursor::SavePosition).unwrap();
+        // stdout
+        //     .write_all(format!("Tiles {completed_tiles}/{total_tiles}\n").as_bytes())
+        //     .unwrap();
         stdout
             .write_all(format!("{msg_time} [{msg_progress}]").as_bytes())
             .unwrap();
@@ -1262,68 +1290,20 @@ fn main() {
             .queue(terminal::Clear(terminal::ClearType::FromCursorDown))
             .unwrap();
 
+        if args.incremetal && counter.rem_euclid(8) == 0 {
+            render_image.save(output_path).unwrap();
+        }
+
+        if done {
+            break;
+        }
+        counter += 1;
         std::thread::sleep(Duration::from_millis(250));
     }
 
-    // for y in 0..args.height {
-    //     for x in 0..args.width {
-    //         if exit_flag.as_ref().load(Ordering::Relaxed) {
-    //             panic!("Interupt received");
-    //         }
-    //         let u = 1.0 - 2.0 * y as f32 / args.height as f32;
-    //         let v = 2.0 * x as f32 / args.width as f32 - 1.0;
-
-    //         let du = -2.0 / args.height as f32;
-    //         let dv = 2.0 / args.width as f32;
-
-    //         let mut col: uv::Vec3 = uv::Vec3::new(0.0, 0.0, 0.0);
-    //         for _ in 0..args.samples {
-    //             let jitter_u = (fastrand::f32() - 0.5) * du;
-    //             let jitter_v = (fastrand::f32() - 0.5) * dv;
-    //             let ray: Ray = Ray {
-    //                 o: uv::Vec3::new(5.0, 2.0, 0.0),
-    //                 d: uv::Vec3::new(-1.0, u + jitter_u, (v + jitter_v) * aspect_ratio)
-    //                     .normalized(),
-    //             };
-    //             col += trace_ray(&ray, &root_render_object, 4) / (args.samples as f32);
-    //         }
-
-    //         let pixel = img_buf.get_pixel_mut(x, y);
-    //         *pixel = image::Rgb([
-    //             (col.x * 255.0) as u8,
-    //             (col.y * 255.0) as u8,
-    //             (col.z * 255.0) as u8,
-    //         ]);
-    //     }
-
-    //     let elapsed = start_time.elapsed().as_secs_f32();
-    //     let total = (elapsed / y as f32) * args.height as f32;
-
-    //     let term_width = terminal::size().map(|(w, _)| w).unwrap_or(32) as usize;
-    //     let msg_time = format!("Rendering: {elapsed:0.2}s / {total:0.2}s");
-    //     let progress_width = (term_width - msg_time.len() - 3).max(8);
-    //     let render_progress =
-    //         (progress_width as f32 * y as f32 / args.height as f32).ceil() as usize;
-
-    //     let msg_progress = (0..progress_width)
-    //         .map(|i| if i <= render_progress { '#' } else { ' ' })
-    //         .collect::<String>();
-
-    //     stdout.queue(cursor::SavePosition).unwrap();
-    //     stdout
-    //         .write_all(format!("{msg_time} [{msg_progress}]").as_bytes())
-    //         .unwrap();
-    //     stdout.queue(cursor::RestorePosition).unwrap();
-    //     stdout.flush().unwrap();
-
-    //     stdout.queue(cursor::RestorePosition).unwrap();
-    //     stdout
-    //         .queue(terminal::Clear(terminal::ClearType::FromCursorDown))
-    //         .unwrap();
-    // }
     let duration = start_time.elapsed().as_secs_f32();
     stdout.execute(cursor::Show).unwrap();
-    println!("Rendered in {duration:0.2}s");
+    println!("Rendered {total_tiles} tiles in {duration:0.2}s");
     render_image.save(output_path).unwrap();
     println!("Image saved to \"{}\"", output_path.to_str().unwrap());
 }
