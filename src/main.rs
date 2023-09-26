@@ -564,45 +564,41 @@ impl RenderObjectBvhBuilder {
 
 impl Hittable for RenderObjectBVH {
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
-        let ray_c = RayInverse8::splat(ray);
+        let ray_inverse = RayInverse8::splat(ray);
 
         let mut hit: Option<Hit> = None;
         let mut min_t = f32::INFINITY;
 
         let mut bvh_tests: Vec<&BvhNode> = vec![self.nodes.first().unwrap()];
-        let mut final_tests: Vec<&dyn Hittable> = vec![];
 
         while let Some(bvh_test_node) = bvh_tests.pop() {
             let hit_data: [f32; 8] = aabb_hit_8(
-                &ray_c,
+                &ray_inverse,
                 bvh_test_node.subnode_bounds.0,
                 bvh_test_node.subnode_bounds.1,
             )
             .into();
 
-            for (hit, subnode) in hit_data.into_iter().zip(bvh_test_node.subnodes) {
-                if !hit.is_nan() && min_t > hit {
-                    match subnode {
+            for (i, t) in hit_data.into_iter().enumerate() {
+                if !t.is_nan() && min_t > t {
+                    match bvh_test_node.subnodes[i] {
                         BvhNodeIndex::Node(index) => {
                             bvh_tests.push(&self.nodes[index]);
                         }
                         BvhNodeIndex::Leaf(index) => {
-                            final_tests.push(self.objects[index].as_ref());
+                            if let Some(new_hit) = self.objects[index].ray_test(ray) {
+                                if let Some(existing_hit) = hit.as_ref() {
+                                    if existing_hit.t > new_hit.t {
+                                        min_t = new_hit.t;
+                                        hit = Some(new_hit);
+                                    }
+                                } else {
+                                    min_t = new_hit.t;
+                                    hit = Some(new_hit);
+                                }
+                            }
                         }
                         BvhNodeIndex::None => {}
-                    }
-                }
-            }
-            while let Some(object) = final_tests.pop() {
-                if let Some(new_hit) = object.ray_test(ray) {
-                    if let Some(existing_hit) = hit.as_ref() {
-                        if existing_hit.t > new_hit.t {
-                            min_t = new_hit.t;
-                            hit = Some(new_hit);
-                        }
-                    } else {
-                        min_t = new_hit.t;
-                        hit = Some(new_hit);
                     }
                 }
             }
