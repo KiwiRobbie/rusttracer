@@ -566,43 +566,48 @@ impl Hittable for RenderObjectBVH {
     fn ray_test(&self, ray: &Ray) -> Option<Hit> {
         let ray_c = RayInverse8::splat(ray);
 
-        let mut bvh_tests: Vec<usize> = vec![0];
-        let mut final_tests: Vec<usize> = vec![];
+        let mut hit: Option<Hit> = None;
+        let mut min_t = f32::INFINITY;
 
-        while let Some(test) = bvh_tests.pop() {
-            let node = &self.nodes[test];
-            let hit_data: [f32; 8] =
-                aabb_hit_8(&ray_c, node.subnode_bounds.0, node.subnode_bounds.1).into();
+        let mut bvh_tests: Vec<&BvhNode> = vec![self.nodes.first().unwrap()];
+        let mut final_tests: Vec<&dyn Hittable> = vec![];
 
-            for (i, subnode) in node.subnodes.as_ref().iter().enumerate() {
-                if hit_data[i].is_nan() {
+        while let Some(bvh_test_node) = bvh_tests.pop() {
+            let hit_data: [f32; 8] = aabb_hit_8(
+                &ray_c,
+                bvh_test_node.subnode_bounds.0,
+                bvh_test_node.subnode_bounds.1,
+            )
+            .into();
+
+            for (hit, subnode) in hit_data.into_iter().zip(bvh_test_node.subnodes) {
+                if !hit.is_nan() && min_t > hit {
                     match subnode {
                         BvhNodeIndex::Node(index) => {
-                            bvh_tests.push(*index);
+                            bvh_tests.push(&self.nodes[index]);
                         }
                         BvhNodeIndex::Leaf(index) => {
-                            final_tests.push(*index);
+                            final_tests.push(self.objects[index].as_ref());
                         }
                         BvhNodeIndex::None => {}
                     }
                 }
             }
-        }
-
-        let mut hit: Option<Hit> = None;
-        while final_tests.len() > 0 {
-            let n = final_tests.pop().unwrap();
-            let temp_hit = self.objects[n].as_ref().ray_test(ray);
-            if temp_hit.is_some() {
-                if hit.is_some() {
-                    if hit.as_ref().unwrap().t > temp_hit.as_ref().unwrap().t {
-                        hit = temp_hit;
+            while let Some(object) = final_tests.pop() {
+                if let Some(new_hit) = object.ray_test(ray) {
+                    if let Some(existing_hit) = hit.as_ref() {
+                        if existing_hit.t > new_hit.t {
+                            min_t = new_hit.t;
+                            hit = Some(new_hit);
+                        }
+                    } else {
+                        min_t = new_hit.t;
+                        hit = Some(new_hit);
                     }
-                } else {
-                    hit = temp_hit;
                 }
             }
         }
+
         hit
     }
 
@@ -707,7 +712,7 @@ fn aabb_hit_8(r: &RayInverse8, min: uv::Vec3x8, max: uv::Vec3x8) -> uv::f32x8 {
         uv::f32x8::max(t5, t6),
     );
 
-    tmax.cmp_ge(uv::f32x8::ZERO) & tmax.cmp_ge(tmin)
+    tmax.cmp_lt(uv::f32x8::ZERO) | tmax.cmp_lt(tmin) | tmin
 }
 
 fn sample_sky(ray: &Ray) -> uv::Vec3 {
