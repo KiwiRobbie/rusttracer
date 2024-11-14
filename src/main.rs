@@ -162,7 +162,6 @@ fn check_finite(v: Vec3) -> bool {
 
 fn model_loader(model_string: &str) -> Vec<Triangle8> {
     println!("\nLoading model \"{model_string}\"");
-    // Create a path to the file // sponza_simple
     let path = Path::new(model_string);
     let display = path.display();
 
@@ -180,13 +179,9 @@ fn model_loader(model_string: &str) -> Vec<Triangle8> {
     let mut vert_normals: Vec<Vec3> = Vec::new();
     let mut faces_on_vert: Vec<Vec<usize>> = Vec::new();
 
-    for line in reader.lines() {
-        let line = line.unwrap();
+    for line in reader.lines().flat_map(|line| line.ok()) {
         let mut line_iter = line.split_ascii_whitespace();
-
-        let mext = line_iter.next();
-
-        match mext {
+        match line_iter.next() {
             Some("v") => {
                 verts.push(Vec3::new(
                     line_iter.next().unwrap().parse::<f32>().unwrap(),
@@ -362,10 +357,10 @@ fn model_loader(model_string: &str) -> Vec<Triangle8> {
     about = "Simple multithreaded SIMD raytracer written in rust"
 )]
 struct CliArguments {
-    #[clap(short = 'w', long, default_value = "512")]
+    #[clap(short = 'W', long, default_value = "512")]
     width: usize,
 
-    #[clap(short = 'k', long, default_value = "512")]
+    #[clap(short = 'H', long, default_value = "512")]
     height: usize,
 
     #[clap(short = 's', long, default_value = "32")]
@@ -378,7 +373,7 @@ struct CliArguments {
     tile_size: usize,
 
     #[clap(long, action)]
-    incremetal: bool,
+    incremental: bool,
 
     #[clap(long)]
     threads: Option<usize>,
@@ -387,17 +382,17 @@ struct CliArguments {
     dump_bvh: Option<String>,
 }
 struct RenderTile {
-    pixel_x: usize,
-    pixel_y: usize,
-    pixel_width: usize,
-    pixel_height: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
 }
 impl RenderTile {
     fn x_range(&self) -> Range<usize> {
-        self.pixel_x..self.pixel_x + self.pixel_width
+        self.x..self.x + self.width
     }
     fn y_range(&self) -> Range<usize> {
-        self.pixel_y..self.pixel_y + self.pixel_height
+        self.y..self.y + self.height
     }
 }
 
@@ -449,10 +444,10 @@ impl RenderImage {
         let tile_height = (pixel_y + self.tile_size).min(self.height) - pixel_y;
 
         let tile = RenderTile {
-            pixel_x,
-            pixel_y,
-            pixel_width: tile_width,
-            pixel_height: tile_height,
+            x: pixel_x,
+            y: pixel_y,
+            width: tile_width,
+            height: tile_height,
         };
 
         {
@@ -460,22 +455,19 @@ impl RenderImage {
             let mut flat = buffer.as_flat_samples_mut();
             let slice = flat.as_mut_slice();
             for target_y in tile.y_range() {
-                let target_start = 3 * (target_y * self.width + tile.pixel_x);
-                let target_end = 3 * (target_y * self.width + tile.pixel_x + tile.pixel_width - 1);
+                let target_start = 3 * (target_y * self.width + tile.x);
+                let target_end = 3 * (target_y * self.width + tile.x + tile.width - 1);
 
                 slice[target_start] = 255;
                 slice[target_end] = 255;
             }
 
-            for pixel in (tile.pixel_y * self.width + tile.pixel_x)
-                ..(tile.pixel_y * self.width + tile.pixel_x + tile.pixel_width)
+            for pixel in (tile.y * self.width + tile.x)..(tile.y * self.width + tile.x + tile.width)
             {
                 slice[3 * pixel] = 255;
             }
-            for pixel in ((tile.pixel_y + tile.pixel_height - 1) * self.width + tile.pixel_x)
-                ..((tile.pixel_y + tile.pixel_height - 1) * self.width
-                    + tile.pixel_x
-                    + tile.pixel_width)
+            for pixel in ((tile.y + tile.height - 1) * self.width + tile.x)
+                ..((tile.y + tile.height - 1) * self.width + tile.x + tile.width)
             {
                 slice[3 * pixel] = 255;
             }
@@ -487,15 +479,15 @@ impl RenderImage {
     fn write_tile(&mut self, tile: RenderTile, data: &[u8]) {
         let mut buffer = self.buffer.lock().unwrap();
         for (source_y, target_y) in tile.y_range().enumerate() {
-            let target_start = 3 * (target_y * self.width + tile.pixel_x);
-            let target_end = 3 * (target_y * self.width + tile.pixel_x + tile.pixel_width);
+            let target_start = 3 * (target_y * self.width + tile.x);
+            let target_end = 3 * (target_y * self.width + tile.x + tile.width);
 
             let mut flat = buffer.as_flat_samples_mut();
             let slice = flat.as_mut_slice();
             let mut subslice = &mut slice[target_start..target_end];
 
-            let source_start = 3 * source_y * tile.pixel_width;
-            let source_end = source_start + 3 * tile.pixel_width;
+            let source_start = 3 * source_y * tile.width;
+            let source_end = source_start + 3 * tile.width;
 
             subslice.write_all(&data[source_start..source_end]).unwrap();
         }
@@ -508,7 +500,7 @@ impl RenderImage {
     }
 }
 
-fn spaww_render_thread(
+fn spawn_render_thread(
     mut render_image: RenderImage,
     render_object: Arc<dyn Hittable + Send + Sync>,
     exit_flag: Arc<AtomicBool>,
@@ -521,7 +513,7 @@ fn spaww_render_thread(
             for y in render_tile.y_range() {
                 for x in render_tile.x_range() {
                     if exit_flag.as_ref().load(Ordering::Relaxed) {
-                        panic!("Interupt received");
+                        panic!("Interrupt received");
                     }
                     let u = 1.0 - 2.0 * y as f32 / render_image.height as f32;
                     let v = 2.0 * x as f32 / render_image.width as f32 - 1.0;
@@ -659,7 +651,7 @@ fn main() {
 
     let mut threads = (0..num_threads)
         .map(|_| {
-            spaww_render_thread(
+            spawn_render_thread(
                 render_image.clone(),
                 render_object.clone(),
                 exit_flag.clone(),
@@ -711,7 +703,7 @@ fn main() {
             .queue(terminal::Clear(terminal::ClearType::FromCursorDown))
             .unwrap();
 
-        if args.incremetal && counter.rem_euclid(80) == 0 {
+        if args.incremental && counter.rem_euclid(8) == 0 {
             render_image.save(output_path).unwrap();
         }
 
